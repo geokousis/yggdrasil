@@ -337,6 +337,21 @@ SCALE is used for proportional mode."
         (when face
           (put-text-property (+ x i) (+ x i 1) 'face face row))))))
 
+(defun yggdrasil--grid-put-node-link (grid x y width node)
+  "Attach source-jump properties for NODE on GRID at X,Y over WIDTH chars."
+  (let* ((row (aref grid y))
+         (row-len (length row))
+         (beg (max 0 x))
+         (end (min row-len (+ x width)))
+         (src-pos (yggdrasil-node-start-pos node)))
+    (when (< beg end)
+      (add-text-properties
+       beg end
+       `(yggdrasil-source-pos ,src-pos
+                              mouse-face highlight
+                              help-echo "mouse-1/RET: jump to source")
+       row))))
+
 (defun yggdrasil--junction-char (up down left right)
   "Return the appropriate box-drawing character given direction flags."
   (cond
@@ -432,11 +447,12 @@ SCALE is used for proportional mode."
               (cl-loop for row from (1+ bar-y) below (1+ cy)
                        do (yggdrasil--grid-set grid cx row ?|)))))))))
 
-(defun yggdrasil--render (root highlighted-node)
-  "Render ROOT tree to a string.  HIGHLIGHTED-NODE gets highlighted face."
+(defun yggdrasil--render (root highlighted-nodes)
+  "Render ROOT tree to a string.
+HIGHLIGHTED-NODES is a hash table of nodes to draw with highlight face."
   (if (eq yggdrasil--orientation 'left-to-right)
-      (yggdrasil--render-horizontal root highlighted-node)
-    (yggdrasil--render-vertical root highlighted-node)))
+      (yggdrasil--render-horizontal root highlighted-nodes)
+    (yggdrasil--render-vertical root highlighted-nodes)))
 
 (defun yggdrasil--grid-to-string (grid)
   "Join GRID rows into a single string, trimming trailing spaces."
@@ -457,9 +473,9 @@ SCALE is used for proportional mode."
           (setq scale (/ 20.0 max-len)))))
     scale))
 
-(defun yggdrasil--draw-labels (grid root highlighted-node center-x)
+(defun yggdrasil--draw-labels (grid root highlighted-nodes center-x)
   "Draw node labels onto GRID for ROOT tree.
-HIGHLIGHTED-NODE gets the highlight face.  If CENTER-X is non-nil,
+HIGHLIGHTED-NODES gets the highlight face.  If CENTER-X is non-nil,
 labels are centered horizontally at each node's x; otherwise placed
 starting at x."
   (yggdrasil--walk
@@ -470,17 +486,24 @@ starting at x."
             (ny (yggdrasil-node-y n))
             (label-len (length name))
             (lx (if center-x (- nx (/ label-len 2)) nx))
-            (face (when (eq n highlighted-node) 'yggdrasil-highlight)))
+            (face (when (and highlighted-nodes
+                             (gethash n highlighted-nodes))
+                    'yggdrasil-highlight)))
        (if (> label-len 0)
-           (yggdrasil--grid-put-string grid lx ny name face)
-         (when face
-           (let ((ch (aref (aref grid ny) nx)))
-             (yggdrasil--grid-set grid nx ny ch 'yggdrasil-highlight))))))))
+           (progn
+             (yggdrasil--grid-put-string grid lx ny name face)
+             (yggdrasil--grid-put-node-link grid lx ny label-len n))
+         (progn
+           (when face
+             (let ((ch (aref (aref grid ny) nx)))
+               (yggdrasil--grid-set grid nx ny ch 'yggdrasil-highlight)))
+           ;; Unnamed internal nodes still get a 1-char clickable anchor.
+           (yggdrasil--grid-put-node-link grid nx ny 1 n)))))))
 
 ;;; Vertical (top-down) rendering
 
-(defun yggdrasil--render-vertical (root highlighted-node)
-  "Render ROOT as a top-down tree.  HIGHLIGHTED-NODE is highlighted."
+(defun yggdrasil--render-vertical (root highlighted-nodes)
+  "Render ROOT as a top-down tree.  HIGHLIGHTED-NODES are highlighted."
   (yggdrasil--compute-widths root)
   (let* ((scale (yggdrasil--compute-scale root))
          (root-width (yggdrasil-node-subtree-width root))
@@ -492,7 +515,7 @@ starting at x."
          (grid (yggdrasil--make-grid grid-width grid-height)))
     (yggdrasil--walk root
                      (lambda (n) (yggdrasil--draw-connectors grid n)))
-    (yggdrasil--draw-labels grid root highlighted-node t)
+    (yggdrasil--draw-labels grid root highlighted-nodes t)
     (yggdrasil--grid-to-string grid)))
 
 ;;; Horizontal (left-to-right) rendering
@@ -591,8 +614,8 @@ proportional mode."
               (cl-loop for col from (1+ junc-x) below cx
                        do (yggdrasil--grid-set grid col cy ?-)))))))))
 
-(defun yggdrasil--render-horizontal (root highlighted-node)
-  "Render ROOT as a left-to-right tree.  HIGHLIGHTED-NODE is highlighted."
+(defun yggdrasil--render-horizontal (root highlighted-nodes)
+  "Render ROOT as a left-to-right tree.  HIGHLIGHTED-NODES are highlighted."
   (yggdrasil--compute-vspan root)
   (let* ((scale (yggdrasil--compute-scale root))
          (h-step (+ (yggdrasil--max-label-length root) 3))
@@ -605,7 +628,7 @@ proportional mode."
          (grid (yggdrasil--make-grid grid-width grid-height)))
     (yggdrasil--walk root
                      (lambda (n) (yggdrasil--draw-horiz-connectors grid n)))
-    (yggdrasil--draw-labels grid root highlighted-node nil)
+    (yggdrasil--draw-labels grid root highlighted-nodes nil)
     (yggdrasil--grid-to-string grid)))
 
 ;;;; Child frame / display
@@ -625,7 +648,8 @@ proportional mode."
         (erase-buffer)
         (insert content)
         (goto-char (point-min)))
-      (yggdrasil-mode))
+      (yggdrasil-mode)
+      (setq-local yggdrasil--source-buffer source-buffer))
     (with-current-buffer source-buffer
       (setq yggdrasil--display-buffer buf))
     (pcase yggdrasil-display-method
@@ -687,11 +711,86 @@ SOURCE-BUFFER tracks the display buffer."
   (display-buffer buf '(display-buffer-below-selected
                         (window-height . fit-window-to-buffer))))
 
+(defun yggdrasil--collect-highlighted-nodes (root bounds)
+  "Return a hash table of nodes to highlight for ROOT within BOUNDS.
+If region is active, include all nodes touched by the selected range.
+Otherwise include the single deepest node at point."
+  (let ((selected (make-hash-table :test 'eq)))
+    (when bounds
+      (if (use-region-p)
+          (let ((beg (max (car bounds) (region-beginning)))
+                (end (min (cdr bounds) (region-end))))
+            (when (< beg end)
+              (save-excursion
+                (goto-char beg)
+                (while (< (point) end)
+                  (let ((node (yggdrasil--node-at-pos root (point))))
+                    (when node
+                      (puthash node t selected)))
+                  (forward-char 1)))))
+        (when (and (>= (point) (car bounds))
+                   (<= (point) (cdr bounds)))
+          (let ((node (yggdrasil--node-at-pos root (point))))
+            (when node
+              (puthash node t selected))))))
+    (and (> (hash-table-count selected) 0) selected)))
+
+(defun yggdrasil--source-pos-at-point ()
+  "Return source position linked at point in a yggdrasil display buffer."
+  (or (get-text-property (point) 'yggdrasil-source-pos)
+      (when (< (point) (point-max))
+        (get-text-property (1+ (point)) 'yggdrasil-source-pos))
+      (when (> (point) (point-min))
+        (get-text-property (1- (point)) 'yggdrasil-source-pos))))
+
+(defun yggdrasil--resolve-source-buffer ()
+  "Resolve source buffer for current yggdrasil display buffer."
+  (let ((display-buf (current-buffer)))
+    (or (and yggdrasil--source-buffer
+             (buffer-live-p yggdrasil--source-buffer)
+             yggdrasil--source-buffer)
+        (cl-loop for buf in (buffer-list)
+                 thereis
+                 (with-current-buffer buf
+                   (and (buffer-live-p yggdrasil--display-buffer)
+                        (eq yggdrasil--display-buffer display-buf)
+                        buf))))))
+
+(defun yggdrasil--jump-to-source-pos (pos)
+  "Jump to POS in the originating Newick source buffer."
+  (let ((src (yggdrasil--resolve-source-buffer)))
+    (unless (and src (buffer-live-p src))
+      (user-error "Source buffer is no longer available"))
+    (let ((win (or (get-buffer-window src t)
+                   (display-buffer src))))
+      (select-window win)
+      (goto-char (min (point-max) (max (point-min) pos)))
+      (recenter))))
+
+(defun yggdrasil-visit-source ()
+  "Jump to the source Newick position for node under point."
+  (interactive)
+  (let ((pos (yggdrasil--source-pos-at-point)))
+    (unless pos
+      (user-error "No node at point"))
+    (yggdrasil--jump-to-source-pos pos)))
+
+(defun yggdrasil-visit-source-mouse (event)
+  "Jump to source Newick position for node clicked with mouse EVENT."
+  (interactive "e")
+  (mouse-set-point event)
+  (yggdrasil-visit-source))
+
 ;;;; Modes
 
 (defvar yggdrasil-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "RET") #'yggdrasil-visit-source)
+    (define-key map (kbd "<return>") #'yggdrasil-visit-source)
+    (define-key map (kbd "C-m") #'yggdrasil-visit-source)
+    (define-key map (kbd "f") #'yggdrasil-visit-source)
+    (define-key map [mouse-1] #'yggdrasil-visit-source-mouse)
     map)
   "Keymap for `yggdrasil-mode'.")
 
@@ -760,13 +859,11 @@ SOURCE-BUFFER tracks the display buffer."
           (yggdrasil--update-display))))))
 
 (defun yggdrasil--update-display ()
-  "Re-render the tree with the current cursor position highlighted."
+  "Re-render the tree with point/region-driven highlighting."
   (when yggdrasil--root
     (let* ((bounds yggdrasil--newick-bounds)
-           (highlighted (when (and bounds
-                                   (>= (point) (car bounds))
-                                   (<= (point) (cdr bounds)))
-                          (yggdrasil--node-at-pos yggdrasil--root (point))))
+           (highlighted (yggdrasil--collect-highlighted-nodes
+                         yggdrasil--root bounds))
            (content (yggdrasil--render yggdrasil--root highlighted))
            (buf (or yggdrasil--display-buffer
                     (get-buffer-create "*yggdrasil*"))))
@@ -790,14 +887,14 @@ SOURCE-BUFFER tracks the display buffer."
            (end (cdr bounds))
            (str (buffer-substring-no-properties beg end))
            (root (yggdrasil--parse str beg))
-           (highlighted (yggdrasil--node-at-pos root (point)))
+           (highlighted (yggdrasil--collect-highlighted-nodes root bounds))
            (content (yggdrasil--render root highlighted)))
       (setq yggdrasil--root root
             yggdrasil--newick-bounds bounds
             yggdrasil--source-buffer (current-buffer))
       (yggdrasil--show-frame content (current-buffer))
       (yggdrasil-active-mode 1)
-      (message "Yggdrasil: tree visualized. Press q to dismiss, t to toggle lengths."))))
+      (message "Yggdrasil: tree visualized. Click/RET jumps to source; q dismisses, t toggles lengths."))))
 
 (defun yggdrasil-dismiss ()
   "Close the tree visualization and clean up."
@@ -825,7 +922,7 @@ SOURCE-BUFFER tracks the display buffer."
     (let* ((bounds yggdrasil--newick-bounds)
            (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
            (root (yggdrasil--parse str (car bounds)))
-           (highlighted (yggdrasil--node-at-pos root (point)))
+           (highlighted (yggdrasil--collect-highlighted-nodes root bounds))
            (content (yggdrasil--render root highlighted)))
       (setq yggdrasil--root root)
       (yggdrasil--refresh-display content)))
@@ -841,7 +938,7 @@ SOURCE-BUFFER tracks the display buffer."
     (let* ((bounds yggdrasil--newick-bounds)
            (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
            (root (yggdrasil--parse str (car bounds)))
-           (highlighted (yggdrasil--node-at-pos root (point)))
+           (highlighted (yggdrasil--collect-highlighted-nodes root bounds))
            (content (yggdrasil--render root highlighted)))
       (setq yggdrasil--root root)
       (yggdrasil--refresh-display content)))
