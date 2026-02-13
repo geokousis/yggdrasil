@@ -37,6 +37,11 @@
   :type 'boolean
   :group 'yggdrasil)
 
+(defcustom yggdrasil-show-node-numbers nil
+  "If non-nil, show stable node numbers in rendered labels."
+  :type 'boolean
+  :group 'yggdrasil)
+
 (defcustom yggdrasil-display-method 'auto
   "How to display the rendered tree.
 `auto' prefers child frames in GUI Emacs and falls back to a window.
@@ -235,20 +240,44 @@ Return the root `yggdrasil-node'."
 (defconst yggdrasil-min-internal-width 3
   "Minimum width of internal nodes.")
 
-(defun yggdrasil--compute-widths (node)
+(defun yggdrasil--make-node-number-map (root)
+  "Return hash table mapping ROOT tree nodes to display numbers, or nil."
+  (when yggdrasil-show-node-numbers
+    (let ((n 0)
+          (table (make-hash-table :test 'eq)))
+      (yggdrasil--walk
+       root
+       (lambda (node)
+         (setq n (1+ n))
+         (puthash node n table)))
+      table)))
+
+(defun yggdrasil--node-display-label (node &optional node-numbers)
+  "Return label text for NODE, optionally including NODE-NUMBERS."
+  (let* ((name (yggdrasil-node-name node))
+         (num (and node-numbers (gethash node node-numbers))))
+    (cond
+     ((and num (> (length name) 0))
+      (format "%s[%d]" name num))
+     (num
+      (format "[%d]" num))
+     (t
+      name))))
+
+(defun yggdrasil--compute-widths (node &optional node-numbers)
   "Post-order: compute subtree-width for each NODE."
   (let ((children (yggdrasil-node-children node)))
     (if (null children)
         ;; Leaf: width is label length, minimum 1
         (setf (yggdrasil-node-subtree-width node)
-              (max 3 (length (yggdrasil-node-name node))))
+              (max 3 (length (yggdrasil--node-display-label node node-numbers))))
       ;; Internal: sum of children widths + gaps
       (dolist (c children)
-        (yggdrasil--compute-widths c))
+        (yggdrasil--compute-widths c node-numbers))
       (setf (yggdrasil-node-subtree-width node)
-            (max (length (yggdrasil-node-name node))
-				 yggdrasil-min-internal-width
-				 (+ (cl-reduce #'+ children
+            (max (length (yggdrasil--node-display-label node node-numbers))
+                 yggdrasil-min-internal-width
+                 (+ (cl-reduce #'+ children
                                :key #'yggdrasil-node-subtree-width)
                     (* 2 (1- (length children)))))))))
 
@@ -284,7 +313,7 @@ SCALE is used for proportional mode."
             (last-x (yggdrasil-node-x (car (last children)))))
         (setf (yggdrasil-node-x node) (/ (+ first-x last-x) 2))))))
 
-(defun yggdrasil--normalize-positions (node)
+(defun yggdrasil--normalize-positions (node &optional node-numbers)
   "Shift all node positions so minimum x is 0.  Return (max-x . max-y)."
   (let ((min-x most-positive-fixnum)
         (max-x most-negative-fixnum)
@@ -294,7 +323,7 @@ SCALE is used for proportional mode."
                      (lambda (n)
                        (let ((nx (yggdrasil-node-x n))
                              (ny (yggdrasil-node-y n))
-                             (half-label (/ (length (yggdrasil-node-name n)) 2)))
+                             (half-label (/ (length (yggdrasil--node-display-label n node-numbers)) 2)))
                          (setq min-x (min min-x (- nx half-label)))
                          (setq max-x (max max-x (+ nx half-label)))
                          (setq max-y (max max-y ny)))))
@@ -473,7 +502,7 @@ HIGHLIGHTED-NODES is a hash table of nodes to draw with highlight face."
           (setq scale (/ 20.0 max-len)))))
     scale))
 
-(defun yggdrasil--draw-labels (grid root highlighted-nodes center-x)
+(defun yggdrasil--draw-labels (grid root highlighted-nodes node-numbers center-x)
   "Draw node labels onto GRID for ROOT tree.
 HIGHLIGHTED-NODES gets the highlight face.  If CENTER-X is non-nil,
 labels are centered horizontally at each node's x; otherwise placed
@@ -481,17 +510,17 @@ starting at x."
   (yggdrasil--walk
    root
    (lambda (n)
-     (let* ((name (yggdrasil-node-name n))
+     (let* ((label (yggdrasil--node-display-label n node-numbers))
             (nx (yggdrasil-node-x n))
             (ny (yggdrasil-node-y n))
-            (label-len (length name))
+            (label-len (length label))
             (lx (if center-x (- nx (/ label-len 2)) nx))
             (face (when (and highlighted-nodes
                              (gethash n highlighted-nodes))
                     'yggdrasil-highlight)))
        (if (> label-len 0)
            (progn
-             (yggdrasil--grid-put-string grid lx ny name face)
+             (yggdrasil--grid-put-string grid lx ny label face)
              (yggdrasil--grid-put-node-link grid lx ny label-len n))
          (progn
            (when face
@@ -504,19 +533,20 @@ starting at x."
 
 (defun yggdrasil--render-vertical (root highlighted-nodes)
   "Render ROOT as a top-down tree.  HIGHLIGHTED-NODES are highlighted."
-  (yggdrasil--compute-widths root)
-  (let* ((scale (yggdrasil--compute-scale root))
-         (root-width (yggdrasil-node-subtree-width root))
-         (root-x (/ root-width 2)))
-    (yggdrasil--assign-positions root (max root-x 2) 0 scale))
-  (let* ((bounds (yggdrasil--normalize-positions root))
-         (grid-width (+ (car bounds) 2))
-         (grid-height (+ (cdr bounds) 2))
-         (grid (yggdrasil--make-grid grid-width grid-height)))
-    (yggdrasil--walk root
-                     (lambda (n) (yggdrasil--draw-connectors grid n)))
-    (yggdrasil--draw-labels grid root highlighted-nodes t)
-    (yggdrasil--grid-to-string grid)))
+  (let* ((node-numbers (yggdrasil--make-node-number-map root))
+         (scale (yggdrasil--compute-scale root)))
+    (yggdrasil--compute-widths root node-numbers)
+    (let* ((root-width (yggdrasil-node-subtree-width root))
+           (root-x (/ root-width 2)))
+      (yggdrasil--assign-positions root (max root-x 2) 0 scale))
+    (let* ((bounds (yggdrasil--normalize-positions root node-numbers))
+           (grid-width (+ (car bounds) 2))
+           (grid-height (+ (cdr bounds) 2))
+           (grid (yggdrasil--make-grid grid-width grid-height)))
+      (yggdrasil--walk root
+                       (lambda (n) (yggdrasil--draw-connectors grid n)))
+      (yggdrasil--draw-labels grid root highlighted-nodes node-numbers t)
+      (yggdrasil--grid-to-string grid))))
 
 ;;; Horizontal (left-to-right) rendering
 
@@ -532,10 +562,13 @@ nodes get the sum of children spans plus 1-row gaps."
             (+ (cl-reduce #'+ children :key #'yggdrasil-node-subtree-width)
                (1- (length children)))))))
 
-(defun yggdrasil--max-label-length (root)
+(defun yggdrasil--max-label-length (root &optional node-numbers)
   "Return the maximum label length in ROOT tree."
   (let ((m 0))
-    (yggdrasil--walk root (lambda (n) (setq m (max m (length (yggdrasil-node-name n))))))
+    (yggdrasil--walk
+     root
+     (lambda (n)
+       (setq m (max m (length (yggdrasil--node-display-label n node-numbers))))))
     m))
 
 (defun yggdrasil--assign-horiz-positions (node x y h-step scale)
@@ -563,13 +596,13 @@ proportional mode."
               (last-y (yggdrasil-node-y (car (last children)))))
           (setf (yggdrasil-node-y node) (/ (+ first-y last-y) 2)))))))
 
-(defun yggdrasil--draw-horiz-connectors (grid node)
+(defun yggdrasil--draw-horiz-connectors (grid node &optional node-numbers)
   "Draw left-to-right connectors from NODE to its children on GRID."
   (let ((children (yggdrasil-node-children node))
         (px (yggdrasil-node-x node))
         (py (yggdrasil-node-y node)))
     (when children
-      (let* ((label-end (+ px (length (yggdrasil-node-name node))))
+      (let* ((label-end (+ px (length (yggdrasil--node-display-label node node-numbers))))
              (junc-x (1+ label-end))
              (child-ys (mapcar #'yggdrasil-node-y children))
              (min-cy (apply #'min child-ys))
@@ -616,20 +649,22 @@ proportional mode."
 
 (defun yggdrasil--render-horizontal (root highlighted-nodes)
   "Render ROOT as a left-to-right tree.  HIGHLIGHTED-NODES are highlighted."
-  (yggdrasil--compute-vspan root)
-  (let* ((scale (yggdrasil--compute-scale root))
-         (h-step (+ (yggdrasil--max-label-length root) 3))
-         (root-vspan (yggdrasil-node-subtree-width root))
-         (root-y (/ root-vspan 2)))
-    (yggdrasil--assign-horiz-positions root 1 (max root-y 1) h-step scale))
-  (let* ((bounds (yggdrasil--normalize-positions root))
-         (grid-width (+ (car bounds) (yggdrasil--max-label-length root) 2))
-         (grid-height (+ (cdr bounds) 2))
-         (grid (yggdrasil--make-grid grid-width grid-height)))
-    (yggdrasil--walk root
-                     (lambda (n) (yggdrasil--draw-horiz-connectors grid n)))
-    (yggdrasil--draw-labels grid root highlighted-nodes nil)
-    (yggdrasil--grid-to-string grid)))
+  (let* ((node-numbers (yggdrasil--make-node-number-map root))
+         (scale (yggdrasil--compute-scale root))
+         (max-label-len (yggdrasil--max-label-length root node-numbers))
+         (h-step (+ max-label-len 3)))
+    (yggdrasil--compute-vspan root)
+    (let* ((root-vspan (yggdrasil-node-subtree-width root))
+           (root-y (/ root-vspan 2)))
+      (yggdrasil--assign-horiz-positions root 1 (max root-y 1) h-step scale))
+    (let* ((bounds (yggdrasil--normalize-positions root node-numbers))
+           (grid-width (+ (car bounds) max-label-len 2))
+           (grid-height (+ (cdr bounds) 2))
+           (grid (yggdrasil--make-grid grid-width grid-height)))
+      (yggdrasil--walk root
+                       (lambda (n) (yggdrasil--draw-horiz-connectors grid n node-numbers)))
+      (yggdrasil--draw-labels grid root highlighted-nodes node-numbers nil)
+      (yggdrasil--grid-to-string grid))))
 
 ;;;; Child frame / display
 
@@ -803,6 +838,7 @@ Otherwise include the single deepest node at point."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "q") #'yggdrasil-dismiss)
     (define-key map (kbd "t") #'yggdrasil-toggle-lengths)
+    (define-key map (kbd "n") #'yggdrasil-toggle-node-numbers)
     (define-key map (kbd "r") #'yggdrasil-rotate)
     map)
   "Keymap for `yggdrasil-active-mode'.")
@@ -894,7 +930,7 @@ Otherwise include the single deepest node at point."
             yggdrasil--source-buffer (current-buffer))
       (yggdrasil--show-frame content (current-buffer))
       (yggdrasil-active-mode 1)
-      (message "Yggdrasil: tree visualized. Click/RET jumps to source; q dismisses, t toggles lengths."))))
+      (message "Yggdrasil: click/RET jump; q dismisses; t lengths; n node numbers; r rotate."))))
 
 (defun yggdrasil-dismiss ()
   "Close the tree visualization and clean up."
@@ -928,6 +964,21 @@ Otherwise include the single deepest node at point."
       (yggdrasil--refresh-display content)))
   (message "Yggdrasil: branch lengths %s."
            (if yggdrasil-show-branch-lengths "shown" "hidden")))
+
+(defun yggdrasil-toggle-node-numbers ()
+  "Toggle node numbers in labels and re-render."
+  (interactive)
+  (setq yggdrasil-show-node-numbers (not yggdrasil-show-node-numbers))
+  (when yggdrasil--root
+    (let* ((bounds yggdrasil--newick-bounds)
+           (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
+           (root (yggdrasil--parse str (car bounds)))
+           (highlighted (yggdrasil--collect-highlighted-nodes root bounds))
+           (content (yggdrasil--render root highlighted)))
+      (setq yggdrasil--root root)
+      (yggdrasil--refresh-display content)))
+  (message "Yggdrasil: node numbers %s."
+           (if yggdrasil-show-node-numbers "shown" "hidden")))
 
 (defun yggdrasil-rotate ()
   "Toggle tree orientation between top-down and left-to-right."

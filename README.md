@@ -97,6 +97,7 @@ The snapshots below are real output from current `yggdrasil.el` for the example 
 |---|---|---|
 | `q` | `yggdrasil-dismiss` | Close visualization |
 | `t` | `yggdrasil-toggle-lengths` | Toggle proportional branch lengths |
+| `n` | `yggdrasil-toggle-node-numbers` | Toggle node numbers in labels |
 | `r` | `yggdrasil-rotate` | Switch orientation |
 
 ### In `*yggdrasil*` render buffer
@@ -115,6 +116,7 @@ The snapshots below are real output from current `yggdrasil.el` for the example 
 |---|---|---|
 | `yggdrasil-auto-close` | `nil` | Close visualization when point leaves Newick bounds |
 | `yggdrasil-show-branch-lengths` | `nil` | Scale edges by branch length |
+| `yggdrasil-show-node-numbers` | `nil` | Show node numbers as `Label[ID]` / `[ID]` |
 | `yggdrasil-display-method` | `auto` | `auto`, `child-frame`, or `window` |
 | `yggdrasil-frame-parameters` | alist | Extra child-frame parameters |
 
