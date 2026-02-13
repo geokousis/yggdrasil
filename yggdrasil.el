@@ -219,8 +219,11 @@ Return the root `yggdrasil-node'."
 
 ;;;; ASCII renderer
 
-(defconst yggdrasil--vert-step 2
+(defconst yggdrasil--vert-step 3
   "Vertical distance between levels in topology mode.")
+
+(defconst yggdrasil-min-internal-width 3
+  "Minimum width of internal nodes.")
 
 (defun yggdrasil--compute-widths (node)
   "Post-order: compute subtree-width for each NODE."
@@ -228,13 +231,14 @@ Return the root `yggdrasil-node'."
     (if (null children)
         ;; Leaf: width is label length, minimum 1
         (setf (yggdrasil-node-subtree-width node)
-              (max 1 (length (yggdrasil-node-name node))))
+              (max 3 (length (yggdrasil-node-name node))))
       ;; Internal: sum of children widths + gaps
       (dolist (c children)
         (yggdrasil--compute-widths c))
       (setf (yggdrasil-node-subtree-width node)
             (max (length (yggdrasil-node-name node))
-                 (+ (cl-reduce #'+ children
+				 yggdrasil-min-internal-width
+				 (+ (cl-reduce #'+ children
                                :key #'yggdrasil-node-subtree-width)
                     (* 2 (1- (length children)))))))))
 
@@ -301,7 +305,7 @@ SCALE is used for proportional mode."
   "Create a 2D grid (vector of strings) of WIDTH x HEIGHT spaces."
   (let ((grid (make-vector height nil)))
     (dotimes (i height)
-      (aset grid i (make-string width ?\s)))
+      (aset grid i (string-to-multibyte (make-string width ?\s))))
     grid))
 
 (defun yggdrasil--grid-set (grid x y ch &optional face)
@@ -327,25 +331,25 @@ SCALE is used for proportional mode."
   "Return the appropriate box-drawing character given direction flags."
   (cond
    ;; Four-way
-   ((and up down left right) ?┼)
+   ((and up down left right) ?+)
    ;; Three-way
-   ((and up left right) ?┴)
-   ((and down left right) ?┬)
-   ((and up down right) ?├)
-   ((and up down left) ?┤)
+   ((and up left right) ?+)
+   ((and down left right) ?+)
+   ((and up down right) ?+)
+   ((and up down left) ?+)
    ;; Two-way corners
-   ((and down right) ?┌)
-   ((and down left) ?┐)
-   ((and up right) ?└)
-   ((and up left) ?┘)
+   ((and down right) ?+)
+   ((and down left) ?+)
+   ((and up right) ?+)
+   ((and up left) ?+)
    ;; Straight
-   ((and left right) ?─)
-   ((and up down) ?│)
+   ((and left right) ?-)
+   ((and up down) ?|)
    ;; Single direction
-   (left ?─)
-   (right ?─)
-   (up ?│)
-   (down ?│)
+   (left ?-)
+   (right ?-)
+   (up ?|)
+   (down ?|)
    (t ?\s)))
 
 (defun yggdrasil--draw-connectors (grid node)
@@ -360,15 +364,15 @@ SCALE is used for proportional mode."
                  (cy (yggdrasil-node-y child))
                  (cx (yggdrasil-node-x child)))
             ;; Vertical segment from parent down
-            (cl-loop for row from (1+ py) below cy
-                     do (yggdrasil--grid-set grid px row ?│))
+            (cl-loop for row from (1+ py) below  cy
+                     do (yggdrasil--grid-set grid px row ?|))
             ;; If child is offset, draw horizontal + vertical
             (when (/= px cx)
               (let ((min-x (min px cx))
                     (max-x (max px cx)))
                 ;; Horizontal bar at row py+1
                 (cl-loop for col from (1+ min-x) below max-x
-                         do (yggdrasil--grid-set grid col (1+ py) ?─))
+                         do (yggdrasil--grid-set grid col (1+ py) ?-))
                 ;; Junction at parent x
                 (yggdrasil--grid-set grid px (1+ py)
                                      (yggdrasil--junction-char nil t (> px cx) (< px cx)))
@@ -377,7 +381,7 @@ SCALE is used for proportional mode."
                                      (yggdrasil--junction-char nil nil (< cx px) (> cx px)))
                 ;; Vertical from junction down to child
                 (cl-loop for row from (+ py 2) below cy
-                         do (yggdrasil--grid-set grid cx row ?│)))))
+                         do (yggdrasil--grid-set grid cx row ?|)))))
         ;; Multiple children: horizontal bar connecting all
         (let* ((child-xs (mapcar #'yggdrasil-node-x children))
                (min-cx (apply #'min child-xs))
@@ -392,7 +396,7 @@ SCALE is used for proportional mode."
           ;; If parent is above bar, draw down segment
           (when (> bar-y (1+ py))
             (cl-loop for row from (1+ py) below bar-y
-                     do (yggdrasil--grid-set grid px row ?│)))
+                     do (yggdrasil--grid-set grid px row ?|)))
           ;; Draw horizontal bar
           (cl-loop for col from min-cx to max-cx
                    do (let* ((is-child-x (member col child-xs))
@@ -410,13 +414,13 @@ SCALE is used for proportional mode."
                            grid col bar-y
                            (yggdrasil--junction-char nil t has-left has-right)))
                          (t
-                          (yggdrasil--grid-set grid col bar-y ?─)))))
+                          (yggdrasil--grid-set grid col bar-y ?-)))))
           ;; Vertical segments from bar down to each child
           (dolist (child children)
             (let ((cx (yggdrasil-node-x child))
                   (cy (yggdrasil-node-y child)))
-              (cl-loop for row from (1+ bar-y) below cy
-                       do (yggdrasil--grid-set grid cx row ?│)))))))))
+              (cl-loop for row from (1+ bar-y) below (1+ cy)
+                       do (yggdrasil--grid-set grid cx row ?|)))))))))
 
 (defun yggdrasil--render (root highlighted-node)
   "Render ROOT tree to a string.  HIGHLIGHTED-NODE gets highlighted face."
@@ -471,7 +475,7 @@ starting at x."
   (let* ((scale (yggdrasil--compute-scale root))
          (root-width (yggdrasil-node-subtree-width root))
          (root-x (/ root-width 2)))
-    (yggdrasil--assign-positions root (max root-x 1) 0 scale))
+    (yggdrasil--assign-positions root (max root-x 2) 0 scale))
   (let* ((bounds (yggdrasil--normalize-positions root))
          (grid-width (+ (car bounds) 2))
          (grid-height (+ (cdr bounds) 2))
@@ -539,7 +543,7 @@ proportional mode."
              (max-cy (apply #'max child-ys)))
         ;; Horizontal line from label end to junction column
         (cl-loop for col from label-end to junc-x
-                 do (yggdrasil--grid-set grid col py ?─))
+                 do (yggdrasil--grid-set grid col py ?-))
         (if (= (length children) 1)
             ;; Single child: horizontal line straight across
             (let* ((child (car children))
@@ -548,16 +552,16 @@ proportional mode."
               (if (= py cy)
                   ;; Same row: just extend horizontal line
                   (cl-loop for col from (1+ junc-x) below cx
-                           do (yggdrasil--grid-set grid col cy ?─))
+                           do (yggdrasil--grid-set grid col cy ?-))
                 ;; Different row: go horizontal to junc, vertical, then horizontal
                 (yggdrasil--grid-set grid junc-x py
                                      (yggdrasil--junction-char (> py cy) (< py cy) t nil))
                 (cl-loop for row from (1+ (min py cy)) below (max py cy)
-                         do (yggdrasil--grid-set grid junc-x row ?│))
+                         do (yggdrasil--grid-set grid junc-x row ?|))
                 (yggdrasil--grid-set grid junc-x cy
                                      (yggdrasil--junction-char (< cy py) (> cy py) nil t))
                 (cl-loop for col from (1+ junc-x) below cx
-                         do (yggdrasil--grid-set grid col cy ?─))))
+                         do (yggdrasil--grid-set grid col cy ?-))))
           ;; Multiple children: vertical bar at junction column
           (cl-loop for row from min-cy to max-cy
                    do (let* ((is-child (member row child-ys))
@@ -575,7 +579,7 @@ proportional mode."
             (let ((cx (yggdrasil-node-x child))
                   (cy (yggdrasil-node-y child)))
               (cl-loop for col from (1+ junc-x) below cx
-                       do (yggdrasil--grid-set grid col cy ?─)))))))))
+                       do (yggdrasil--grid-set grid col cy ?-)))))))))
 
 (defun yggdrasil--render-horizontal (root highlighted-node)
   "Render ROOT as a left-to-right tree.  HIGHLIGHTED-NODE is highlighted."
