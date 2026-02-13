@@ -100,7 +100,7 @@ The snapshots below are real output from current `yggdrasil.el` for the example 
 | `n` | `yggdrasil-toggle-node-numbers` | Toggle node numbers in labels |
 | `r` | `yggdrasil-rotate` | Switch orientation |
 
-### In `*yggdrasil*` render buffer
+### In `yggdrasil` render buffer
 
 | Key/Mouse | Command | Action |
 |---|---|---|
