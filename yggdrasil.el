@@ -37,6 +37,16 @@
   :type 'boolean
   :group 'yggdrasil)
 
+(defcustom yggdrasil-display-method 'auto
+  "How to display the rendered tree.
+`auto' prefers child frames in GUI Emacs and falls back to a window.
+`child-frame' forces child frame display.
+`window' always uses a normal Emacs window."
+  :type '(choice (const :tag "Auto" auto)
+                 (const :tag "Child frame" child-frame)
+                 (const :tag "Window" window))
+  :group 'yggdrasil)
+
 (defcustom yggdrasil-frame-parameters
   '((internal-border-width . 1)
     (left-fringe . 0)
@@ -618,9 +628,24 @@ proportional mode."
       (yggdrasil-mode))
     (with-current-buffer source-buffer
       (setq yggdrasil--display-buffer buf))
-    (if (display-graphic-p)
-        (yggdrasil--show-child-frame buf max-line-len num-lines source-buffer)
-      (yggdrasil--show-window buf source-buffer))))
+    (pcase yggdrasil-display-method
+      ('window
+       (yggdrasil--show-window buf source-buffer))
+      ('child-frame
+       (if (display-graphic-p)
+           (yggdrasil--show-child-frame buf max-line-len num-lines source-buffer)
+         (user-error "Yggdrasil child-frame display requires GUI Emacs")))
+      (_
+       ;; Auto mode: prefer child frames, but always fall back to a normal
+       ;; window if frame creation fails (common on some WM/GUI setups).
+       (if (display-graphic-p)
+           (condition-case err
+               (yggdrasil--show-child-frame buf max-line-len num-lines source-buffer)
+             (error
+              (message "Yggdrasil: child frame failed (%s), using window."
+                       (error-message-string err))
+              (yggdrasil--show-window buf source-buffer)))
+         (yggdrasil--show-window buf source-buffer))))))
 
 (defun yggdrasil--show-child-frame (buf width height source-buffer)
   "Show BUF in a child frame of WIDTH x HEIGHT chars.
