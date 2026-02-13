@@ -503,7 +503,7 @@ Reuses the `subtree-width' field.  Leaves get span 1, internal
 nodes get the sum of children spans plus 1-row gaps."
   (let ((children (yggdrasil-node-children node)))
     (if (null children)
-        (setf (yggdrasil-node-subtree-width node) 1)
+        (setf (yggdrasil-node-subtree-width node) 3)
       (dolist (c children) (yggdrasil--compute-vspan c))
       (setf (yggdrasil-node-subtree-width node)
             (+ (cl-reduce #'+ children :key #'yggdrasil-node-subtree-width)
