@@ -42,6 +42,11 @@
   :type 'boolean
   :group 'yggdrasil)
 
+(defcustom yggdrasil-camera-follow nil
+  "If non-nil, keep the highlighted node in view in the render display."
+  :type 'boolean
+  :group 'yggdrasil)
+
 (defcustom yggdrasil-display-method 'auto
   "How to display the rendered tree.
 `auto' prefers child frames in GUI Emacs and falls back to a window.
@@ -50,6 +55,12 @@
   :type '(choice (const :tag "Auto" auto)
                  (const :tag "Child frame" child-frame)
                  (const :tag "Window" window))
+  :group 'yggdrasil)
+
+(defcustom yggdrasil-update-idle-delay 0.03
+  "Idle delay in seconds before refreshing highlight after cursor movement.
+Set to 0 for immediate re-rendering on every command."
+  :type 'number
   :group 'yggdrasil)
 
 (defcustom yggdrasil-frame-parameters
@@ -88,6 +99,11 @@
   (y 0 :type integer)
   (subtree-width 0 :type integer))
 
+(cl-defstruct (yggdrasil-grid (:constructor yggdrasil-grid-create))
+  "Grid backing store for renderer rows and per-row extents."
+  (rows nil :type vector)
+  (rightmost nil :type vector))
+
 ;;;; Internal state
 
 (defvar-local yggdrasil--frame nil
@@ -107,6 +123,18 @@
 
 (defvar-local yggdrasil--display-buffer nil
   "The buffer used for tree display.")
+
+(defvar-local yggdrasil--update-timer nil
+  "Idle timer used to coalesce frequent highlight updates.")
+
+(defvar-local yggdrasil--last-highlight-key nil
+  "Last rendered highlight key in the source buffer.")
+
+(defvar-local yggdrasil--display-link-ranges nil
+  "Hash table mapping source positions to rendered buffer ranges.")
+
+(defvar-local yggdrasil--highlighted-source-positions nil
+  "Hash set of currently highlighted source positions in display.")
 
 ;;;; Newick detection
 
@@ -341,45 +369,77 @@ SCALE is used for proportional mode."
     (yggdrasil--walk c fn)))
 
 (defun yggdrasil--make-grid (width height)
-  "Create a 2D grid (vector of strings) of WIDTH x HEIGHT spaces."
-  (let ((grid (make-vector height nil)))
+  "Create a rendering grid of WIDTH x HEIGHT spaces."
+  (let ((rows (make-vector height nil))
+        (rightmost (make-vector height -1)))
     (dotimes (i height)
-      (aset grid i (string-to-multibyte (make-string width ?\s))))
-    grid))
+      (aset rows i (string-to-multibyte (make-string width ?\s))))
+    (yggdrasil-grid-create :rows rows :rightmost rightmost)))
+
+(defun yggdrasil--grid-mark-rightmost (grid y x)
+  "Record X as a used column on row Y in GRID."
+  (let ((rightmost (yggdrasil-grid-rightmost grid)))
+    (when (> x (aref rightmost y))
+      (aset rightmost y x))))
 
 (defun yggdrasil--grid-set (grid x y ch &optional face)
   "Set character at X, Y in GRID to CH with optional FACE."
-  (when (and (>= y 0) (< y (length grid))
-             (>= x 0) (< x (length (aref grid y))))
-    (let ((row (aref grid y)))
-      (aset row x ch)
-      (when face
-        (put-text-property x (1+ x) 'face face row)))))
+  (let ((rows (yggdrasil-grid-rows grid)))
+    (when (and (>= y 0) (< y (length rows)))
+      (let ((row (aref rows y)))
+        (when (and (>= x 0) (< x (length row)))
+          (yggdrasil--grid-mark-rightmost grid y x)
+          (aset row x ch)
+          (when face
+            (put-text-property x (1+ x) 'face face row)))))))
 
 (defun yggdrasil--grid-put-string (grid x y str &optional face)
   "Write STR at position X, Y in GRID with optional FACE."
-  (let ((row (aref grid y))
-        (len (length str)))
-    (dotimes (i len)
-      (when (and (>= (+ x i) 0) (< (+ x i) (length row)))
-        (aset row (+ x i) (aref str i))
-        (when face
-          (put-text-property (+ x i) (+ x i 1) 'face face row))))))
+  (let* ((rows (yggdrasil-grid-rows grid))
+         (row (aref rows y))
+         (row-len (length row))
+         (str-len (length str))
+         (beg (max 0 x))
+         (end (min row-len (+ x str-len))))
+    (when (< beg end)
+      (yggdrasil--grid-mark-rightmost grid y (1- end))
+      (dotimes (i (- end beg))
+        (let ((col (+ beg i))
+              (src (+ (- beg x) i)))
+          (aset row col (aref str src))
+          (when face
+            (put-text-property col (1+ col) 'face face row)))))))
 
 (defun yggdrasil--grid-put-node-link (grid x y width node)
   "Attach source-jump properties for NODE on GRID at X,Y over WIDTH chars."
-  (let* ((row (aref grid y))
+  (let* ((row (aref (yggdrasil-grid-rows grid) y))
          (row-len (length row))
          (beg (max 0 x))
          (end (min row-len (+ x width)))
          (src-pos (yggdrasil-node-start-pos node)))
     (when (< beg end)
+      ;; Keep clickable regions from being trimmed away when a row is all spaces.
+      (yggdrasil--grid-mark-rightmost grid y (1- end))
       (add-text-properties
        beg end
        `(yggdrasil-source-pos ,src-pos
                               mouse-face highlight
                               help-echo "mouse-1/RET: jump to source")
        row))))
+
+(defun yggdrasil--grid-to-string (grid)
+  "Join GRID rows into a single string, trimming unused trailing space."
+  (let* ((rows (yggdrasil-grid-rows grid))
+         (rightmost (yggdrasil-grid-rightmost grid))
+         (height (length rows)))
+    (with-temp-buffer
+      (dotimes (i height)
+        (when (> i 0)
+          (insert "\n"))
+        (let ((max-col (aref rightmost i)))
+          (when (>= max-col 0)
+            (insert (substring (aref rows i) 0 (1+ max-col))))))
+      (buffer-string))))
 
 (defun yggdrasil--junction-char (up down left right)
   "Return the appropriate box-drawing character given direction flags."
@@ -483,12 +543,6 @@ HIGHLIGHTED-NODES is a hash table of nodes to draw with highlight face."
       (yggdrasil--render-horizontal root highlighted-nodes)
     (yggdrasil--render-vertical root highlighted-nodes)))
 
-(defun yggdrasil--grid-to-string (grid)
-  "Join GRID rows into a single string, trimming trailing spaces."
-  (mapconcat (lambda (row)
-               (replace-regexp-in-string "\\s-+$" "" row))
-             grid "\n"))
-
 (defun yggdrasil--compute-scale (root)
   "Compute a length scale for proportional mode from ROOT."
   (let ((scale 10))
@@ -524,7 +578,7 @@ starting at x."
              (yggdrasil--grid-put-node-link grid lx ny label-len n))
          (progn
            (when face
-             (let ((ch (aref (aref grid ny) nx)))
+             (let ((ch (aref (aref (yggdrasil-grid-rows grid) ny) nx)))
                (yggdrasil--grid-set grid nx ny ch 'yggdrasil-highlight)))
            ;; Unnamed internal nodes still get a 1-char clickable anchor.
            (yggdrasil--grid-put-node-link grid nx ny 1 n)))))))
@@ -746,28 +800,66 @@ SOURCE-BUFFER tracks the display buffer."
   (display-buffer buf '(display-buffer-below-selected
                         (window-height . fit-window-to-buffer))))
 
-(defun yggdrasil--collect-highlighted-nodes (root bounds)
-  "Return a hash table of nodes to highlight for ROOT within BOUNDS.
-If region is active, include all nodes touched by the selected range.
-Otherwise include the single deepest node at point."
+(defun yggdrasil--highlight-key-equal-p (a b)
+  "Return non-nil when highlight keys A and B represent the same selection."
+  (pcase (list a b)
+    (`((none) (none)) t)
+    (`((point ,na) (point ,nb)) (eq na nb))
+    (`((region ,abeg ,aend) (region ,bbeg ,bend))
+     (and (= abeg bbeg) (= aend bend)))
+    (_ nil)))
+
+(defun yggdrasil--highlight-key (root bounds)
+  "Return a compact key describing current highlight selection."
+  (if (or (null root) (null bounds))
+      '(none)
+    (let ((pt (point)))
+      (cond
+       ((use-region-p)
+        (let ((beg (max (car bounds) (region-beginning)))
+              (end (min (cdr bounds) (region-end))))
+          (if (< beg end)
+              (list 'region beg end)
+            '(none))))
+       ((and (>= pt (car bounds))
+             (<= pt (cdr bounds)))
+       ;; Reuse prior point-node highlight while point stays in that node.
+       (let* ((prior (and (eq (car-safe yggdrasil--last-highlight-key) 'point)
+                           (cadr yggdrasil--last-highlight-key)))
+               (node
+                (cond
+                 ((null prior)
+                  (yggdrasil--node-at-pos root pt))
+                 ((or (< pt (yggdrasil-node-start-pos prior))
+                      (>= pt (yggdrasil-node-end-pos prior)))
+                  (yggdrasil--node-at-pos root pt))
+                 ;; Safe fast-path: leaves have no deeper descendants.
+                 ((null (yggdrasil-node-children prior))
+                  prior)
+                 ;; Internal prior nodes may contain deeper matches.
+                 (t
+                  (or (yggdrasil--node-at-pos prior pt)
+                      (yggdrasil--node-at-pos root pt))))))
+          (if node
+              (list 'point node)
+            '(none))))
+       (t '(none))))))
+
+(defun yggdrasil--collect-highlighted-nodes (root highlight-key)
+  "Return hash table of nodes to highlight for ROOT using HIGHLIGHT-KEY."
   (let ((selected (make-hash-table :test 'eq)))
-    (when bounds
-      (if (use-region-p)
-          (let ((beg (max (car bounds) (region-beginning)))
-                (end (min (cdr bounds) (region-end))))
-            (when (< beg end)
-              (save-excursion
-                (goto-char beg)
-                (while (< (point) end)
-                  (let ((node (yggdrasil--node-at-pos root (point))))
-                    (when node
-                      (puthash node t selected)))
-                  (forward-char 1)))))
-        (when (and (>= (point) (car bounds))
-                   (<= (point) (cdr bounds)))
-          (let ((node (yggdrasil--node-at-pos root (point))))
-            (when node
-              (puthash node t selected))))))
+    (pcase highlight-key
+      (`(point ,node)
+       (when node
+         (puthash node t selected)))
+      (`(region ,beg ,end)
+       ;; Region highlight is O(nodes), not O(region-length * nodes).
+       (yggdrasil--walk
+        root
+        (lambda (node)
+          (when (and (< (yggdrasil-node-start-pos node) end)
+                     (< beg (yggdrasil-node-end-pos node)))
+            (puthash node t selected))))))
     (and (> (hash-table-count selected) 0) selected)))
 
 (defun yggdrasil--source-pos-at-point ()
@@ -839,6 +931,7 @@ Otherwise include the single deepest node at point."
     (define-key map (kbd "q") #'yggdrasil-dismiss)
     (define-key map (kbd "t") #'yggdrasil-toggle-lengths)
     (define-key map (kbd "n") #'yggdrasil-toggle-node-numbers)
+    (define-key map (kbd "c") #'yggdrasil-toggle-camera)
     (define-key map (kbd "r") #'yggdrasil-rotate)
     map)
   "Keymap for `yggdrasil-active-mode'.")
@@ -856,9 +949,154 @@ Otherwise include the single deepest node at point."
     (remove-hook 'post-command-hook #'yggdrasil--post-command t)
     (if (boundp 'enable-theme-functions)
         (remove-hook 'enable-theme-functions #'yggdrasil--on-theme-change t)
-      (advice-remove 'load-theme #'yggdrasil--on-theme-change))))
+      (advice-remove 'load-theme #'yggdrasil--on-theme-change))
+    (when (timerp yggdrasil--update-timer)
+      (cancel-timer yggdrasil--update-timer)
+      (setq yggdrasil--update-timer nil))
+    (setq yggdrasil--last-highlight-key nil
+          yggdrasil--display-link-ranges nil
+          yggdrasil--highlighted-source-positions nil)))
 
 ;;;; Lifecycle
+
+(defun yggdrasil--cancel-pending-update ()
+  "Cancel any queued idle refresh timer."
+  (when (timerp yggdrasil--update-timer)
+    (cancel-timer yggdrasil--update-timer)
+    (setq yggdrasil--update-timer nil)))
+
+(defun yggdrasil--schedule-update (&optional force)
+  "Schedule a display refresh after idle delay.
+If FORCE is non-nil, bypass the highlight-key equality short-circuit."
+  (yggdrasil--cancel-pending-update)
+  (if (<= yggdrasil-update-idle-delay 0)
+      (yggdrasil--update-display force)
+    (let ((source-buffer (current-buffer)))
+      (setq yggdrasil--update-timer
+            (run-with-idle-timer
+             yggdrasil-update-idle-delay nil
+             (lambda (buf force-refresh)
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (setq yggdrasil--update-timer nil)
+                   (yggdrasil--update-display force-refresh))))
+             source-buffer force)))))
+
+(defun yggdrasil--source-pos-set-from-highlighted (highlighted)
+  "Build a source-position hash set from HIGHLIGHTED node table."
+  (let ((set (make-hash-table :test 'eql)))
+    (when highlighted
+      (maphash (lambda (node _)
+                 (puthash (yggdrasil-node-start-pos node) t set))
+               highlighted))
+    set))
+
+(defun yggdrasil--index-display-links ()
+  "Index rendered yggdrasil links by source position."
+  (let ((table (make-hash-table :test 'eql)))
+    (when (and yggdrasil--display-buffer
+               (buffer-live-p yggdrasil--display-buffer))
+      (with-current-buffer yggdrasil--display-buffer
+        (let ((pos (point-min))
+              (limit (point-max)))
+          (while (< pos limit)
+            (let* ((src (get-text-property pos 'yggdrasil-source-pos))
+                   (next (or (next-single-property-change
+                              pos 'yggdrasil-source-pos nil limit)
+                             limit)))
+              (when src
+                (puthash src (cons (cons pos next) (gethash src table)) table))
+              (setq pos next))))))
+    (setq yggdrasil--display-link-ranges table)))
+
+(defun yggdrasil--apply-highlighted-source-set (new-set)
+  "Apply NEW-SET highlights to display buffer without full re-render.
+Return non-nil when applied."
+  (when (and (hash-table-p new-set)
+             (hash-table-p yggdrasil--display-link-ranges)
+             yggdrasil--display-buffer
+             (buffer-live-p yggdrasil--display-buffer))
+    (let ((old-set (or yggdrasil--highlighted-source-positions
+                       (make-hash-table :test 'eql)))
+          (ranges yggdrasil--display-link-ranges))
+      (with-current-buffer yggdrasil--display-buffer
+        (let ((inhibit-read-only t))
+          (maphash
+           (lambda (src _)
+             (unless (gethash src new-set)
+               (dolist (range (gethash src ranges))
+                 (put-text-property (car range) (cdr range) 'face nil))))
+           old-set)
+          (maphash
+           (lambda (src _)
+             (unless (gethash src old-set)
+               (dolist (range (gethash src ranges))
+                 (put-text-property (car range) (cdr range)
+                                    'face 'yggdrasil-highlight))))
+           new-set)))
+      (setq yggdrasil--highlighted-source-positions new-set)
+      t)))
+
+(defun yggdrasil--first-source-pos (source-set)
+  "Return one source position from SOURCE-SET hash table, or nil."
+  (let (src)
+    (when source-set
+      (maphash (lambda (k _)
+                 (unless src
+                   (setq src k)))
+               source-set))
+    src))
+
+(defun yggdrasil--highlight-source-pos (highlight-key source-set)
+  "Return best source position for camera tracking."
+  (pcase highlight-key
+    (`(point ,node)
+     (and node (yggdrasil-node-start-pos node)))
+    (_ (yggdrasil--first-source-pos source-set))))
+
+(defun yggdrasil--camera-follow-source-pos (source-pos)
+  "Keep SOURCE-POS visible in the render window when camera follow is enabled."
+  (let ((display-buf yggdrasil--display-buffer))
+    (when (and yggdrasil-camera-follow
+               source-pos
+               display-buf
+               (buffer-live-p display-buf)
+               (hash-table-p yggdrasil--display-link-ranges))
+      (let* ((ranges (gethash source-pos yggdrasil--display-link-ranges))
+           (target (and ranges (car (car ranges)))))
+      (let ((win (and target
+                      (or
+                       (and yggdrasil--frame
+                            (frame-live-p yggdrasil--frame)
+                            (let ((frame-win (frame-root-window yggdrasil--frame)))
+                              (and (window-live-p frame-win)
+                                   (eq (window-buffer frame-win) display-buf)
+                                   frame-win)))
+                       (get-buffer-window display-buf t)
+                       (car (get-buffer-window-list display-buf nil t))))))
+        (when (and target (window-live-p win))
+          (with-selected-window win
+            (when (not (pos-visible-in-window-p target win t))
+              (set-window-point win target)
+              (recenter))
+          (let* ((col (with-current-buffer display-buf
+                        (save-excursion
+                          (goto-char target)
+                          (current-column))))
+                 (width (max 1 (window-body-width win)))
+                 (hscroll (window-hscroll win))
+                 (min-col hscroll)
+                 (max-col (+ hscroll (1- width))))
+            (cond
+             ((< col min-col)
+              (set-window-hscroll win (max 0 (- col (/ width 3)))))
+             ((> col max-col)
+              (set-window-hscroll win (max 0 (- col (/ width 2))))))))))))))
+
+(defun yggdrasil--camera-follow-highlight (highlight-key source-set)
+  "Adjust camera to keep current highlight in view."
+  (yggdrasil--camera-follow-source-pos
+   (yggdrasil--highlight-source-pos highlight-key source-set)))
 
 (defun yggdrasil--refresh-display (content)
   "Update the display buffer with CONTENT."
@@ -868,7 +1106,8 @@ Otherwise include the single deepest node at point."
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert content)
-        (goto-char (point-min))))))
+        (goto-char (point-min))))
+    (yggdrasil--index-display-links)))
 
 (defun yggdrasil--on-theme-change (&rest _)
   "Re-render the tree display after a theme change."
@@ -877,7 +1116,7 @@ Otherwise include the single deepest node at point."
     (when (and yggdrasil--frame (frame-live-p yggdrasil--frame))
       (set-frame-parameter yggdrasil--frame 'background-color
                            (face-attribute 'default :background nil t)))
-    (yggdrasil--update-display)))
+    (yggdrasil--schedule-update t)))
 
 (defun yggdrasil--post-command ()
   "Post-command handler: update highlight or auto-close."
@@ -887,28 +1126,44 @@ Otherwise include the single deepest node at point."
                (>= (point) (car bounds))
                (<= (point) (cdr bounds)))
           ;; Still inside Newick string — re-render with updated highlight
-          (yggdrasil--update-display)
+          (yggdrasil--schedule-update)
         ;; Outside
         (if yggdrasil-auto-close
             (yggdrasil-dismiss)
           ;; Still keep the frame but clear highlight
-          (yggdrasil--update-display))))))
+          (yggdrasil--schedule-update))))))
 
-(defun yggdrasil--update-display ()
-  "Re-render the tree with point/region-driven highlighting."
+(defun yggdrasil--update-display (&optional force)
+  "Re-render the tree with point/region-driven highlighting.
+If FORCE is non-nil, render even if highlight selection has not changed."
   (when yggdrasil--root
     (let* ((bounds yggdrasil--newick-bounds)
-           (highlighted (yggdrasil--collect-highlighted-nodes
-                         yggdrasil--root bounds))
-           (content (yggdrasil--render yggdrasil--root highlighted))
-           (buf (or yggdrasil--display-buffer
-                    (get-buffer-create "*yggdrasil*"))))
-      (when (buffer-live-p buf)
-        (with-current-buffer buf
-          (let ((inhibit-read-only t))
-            (erase-buffer)
-            (insert content)
-            (goto-char (point-min))))))))
+           (highlight-key (yggdrasil--highlight-key yggdrasil--root bounds)))
+      (if (and (not force)
+               (yggdrasil--highlight-key-equal-p
+                highlight-key yggdrasil--last-highlight-key))
+          ;; Even when highlight identity is unchanged, camera may need to
+          ;; re-center if the display window/scroll state changed.
+          (yggdrasil--camera-follow-highlight
+           highlight-key yggdrasil--highlighted-source-positions)
+        (setq yggdrasil--last-highlight-key highlight-key)
+        (let* ((highlighted (yggdrasil--collect-highlighted-nodes
+                             yggdrasil--root highlight-key))
+               (highlight-set (yggdrasil--source-pos-set-from-highlighted highlighted)))
+          (unless (yggdrasil--apply-highlighted-source-set highlight-set)
+            (let* ((content (yggdrasil--render yggdrasil--root highlighted))
+                   (buf (or yggdrasil--display-buffer
+                            (get-buffer-create "*yggdrasil*"))))
+              (when (buffer-live-p buf)
+                (setq yggdrasil--display-buffer buf)
+                (with-current-buffer buf
+                  (let ((inhibit-read-only t))
+                    (erase-buffer)
+                    (insert content)
+                    (goto-char (point-min))))
+                (yggdrasil--index-display-links)
+                (setq yggdrasil--highlighted-source-positions highlight-set))))
+          (yggdrasil--camera-follow-highlight highlight-key highlight-set))))))
 
 ;;;; Commands
 
@@ -923,18 +1178,26 @@ Otherwise include the single deepest node at point."
            (end (cdr bounds))
            (str (buffer-substring-no-properties beg end))
            (root (yggdrasil--parse str beg))
-           (highlighted (yggdrasil--collect-highlighted-nodes root bounds))
+           (highlight-key (yggdrasil--highlight-key root bounds))
+           (highlighted (yggdrasil--collect-highlighted-nodes root highlight-key))
            (content (yggdrasil--render root highlighted)))
       (setq yggdrasil--root root
             yggdrasil--newick-bounds bounds
-            yggdrasil--source-buffer (current-buffer))
+            yggdrasil--source-buffer (current-buffer)
+            yggdrasil--last-highlight-key highlight-key
+            yggdrasil--highlighted-source-positions
+            (yggdrasil--source-pos-set-from-highlighted highlighted))
       (yggdrasil--show-frame content (current-buffer))
+      (yggdrasil--index-display-links)
       (yggdrasil-active-mode 1)
-      (message "Yggdrasil: click/RET jump; q dismisses; t lengths; n node numbers; r rotate."))))
+      (yggdrasil--camera-follow-highlight
+       highlight-key yggdrasil--highlighted-source-positions)
+      (message "Yggdrasil: click/RET jump; q dismisses; t lengths; n node numbers; c camera; r rotate."))))
 
 (defun yggdrasil-dismiss ()
   "Close the tree visualization and clean up."
   (interactive)
+  (yggdrasil--cancel-pending-update)
   (when (and yggdrasil--frame (frame-live-p yggdrasil--frame))
     (delete-frame yggdrasil--frame)
     (setq yggdrasil--frame nil))
@@ -946,7 +1209,10 @@ Otherwise include the single deepest node at point."
     (setq yggdrasil--display-buffer nil))
   (setq yggdrasil--root nil
         yggdrasil--newick-bounds nil
-        yggdrasil--orientation 'top-down)
+        yggdrasil--orientation 'top-down
+        yggdrasil--last-highlight-key nil
+        yggdrasil--display-link-ranges nil
+        yggdrasil--highlighted-source-positions nil)
   (yggdrasil-active-mode -1)
   (message "Yggdrasil: dismissed."))
 
@@ -958,10 +1224,16 @@ Otherwise include the single deepest node at point."
     (let* ((bounds yggdrasil--newick-bounds)
            (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
            (root (yggdrasil--parse str (car bounds)))
-           (highlighted (yggdrasil--collect-highlighted-nodes root bounds))
+           (highlight-key (yggdrasil--highlight-key root bounds))
+           (highlighted (yggdrasil--collect-highlighted-nodes root highlight-key))
            (content (yggdrasil--render root highlighted)))
-      (setq yggdrasil--root root)
-      (yggdrasil--refresh-display content)))
+      (setq yggdrasil--root root
+            yggdrasil--last-highlight-key highlight-key
+            yggdrasil--highlighted-source-positions
+            (yggdrasil--source-pos-set-from-highlighted highlighted))
+      (yggdrasil--refresh-display content)
+      (yggdrasil--camera-follow-highlight
+       highlight-key yggdrasil--highlighted-source-positions)))
   (message "Yggdrasil: branch lengths %s."
            (if yggdrasil-show-branch-lengths "shown" "hidden")))
 
@@ -973,12 +1245,27 @@ Otherwise include the single deepest node at point."
     (let* ((bounds yggdrasil--newick-bounds)
            (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
            (root (yggdrasil--parse str (car bounds)))
-           (highlighted (yggdrasil--collect-highlighted-nodes root bounds))
+           (highlight-key (yggdrasil--highlight-key root bounds))
+           (highlighted (yggdrasil--collect-highlighted-nodes root highlight-key))
            (content (yggdrasil--render root highlighted)))
-      (setq yggdrasil--root root)
-      (yggdrasil--refresh-display content)))
+      (setq yggdrasil--root root
+            yggdrasil--last-highlight-key highlight-key
+            yggdrasil--highlighted-source-positions
+            (yggdrasil--source-pos-set-from-highlighted highlighted))
+      (yggdrasil--refresh-display content)
+      (yggdrasil--camera-follow-highlight
+       highlight-key yggdrasil--highlighted-source-positions)))
   (message "Yggdrasil: node numbers %s."
            (if yggdrasil-show-node-numbers "shown" "hidden")))
+
+(defun yggdrasil-toggle-camera ()
+  "Toggle camera follow mode for keeping highlighted nodes in view."
+  (interactive)
+  (setq yggdrasil-camera-follow (not yggdrasil-camera-follow))
+  (when (and yggdrasil-camera-follow yggdrasil--root)
+    (yggdrasil--schedule-update t))
+  (message "Yggdrasil: camera follow %s."
+           (if yggdrasil-camera-follow "enabled" "disabled")))
 
 (defun yggdrasil-rotate ()
   "Toggle tree orientation between top-down and left-to-right."
@@ -989,10 +1276,16 @@ Otherwise include the single deepest node at point."
     (let* ((bounds yggdrasil--newick-bounds)
            (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
            (root (yggdrasil--parse str (car bounds)))
-           (highlighted (yggdrasil--collect-highlighted-nodes root bounds))
+           (highlight-key (yggdrasil--highlight-key root bounds))
+           (highlighted (yggdrasil--collect-highlighted-nodes root highlight-key))
            (content (yggdrasil--render root highlighted)))
-      (setq yggdrasil--root root)
-      (yggdrasil--refresh-display content)))
+      (setq yggdrasil--root root
+            yggdrasil--last-highlight-key highlight-key
+            yggdrasil--highlighted-source-positions
+            (yggdrasil--source-pos-set-from-highlighted highlighted))
+      (yggdrasil--refresh-display content)
+      (yggdrasil--camera-follow-highlight
+       highlight-key yggdrasil--highlighted-source-positions)))
   (message "Yggdrasil: %s." yggdrasil--orientation))
 
 (provide 'yggdrasil)
