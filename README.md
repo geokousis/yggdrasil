@@ -54,7 +54,20 @@ Place point inside a Newick string and run `M-x yggdrasil-visualize`.
 2. Put point inside that string.
 3. Run `M-x yggdrasil-visualize`.
 
-## Rendered Output (Actual)
+### Quick test (no config changes)
+
+From the repo directory, run:
+
+```bash
+emacs -nw -Q -L ~/yggdrasil \
+  --eval "(require 'yggdrasil)" \
+  --eval "(setq yggdrasil-display-method 'window)" \
+  --eval "(find-file \"test.nwk\")" \
+  --eval "(goto-char (point-min))" \
+  --eval "(yggdrasil-visualize)"
+```
+
+## Rendered Output
 
 The snapshots below are real output from current `yggdrasil.el` for the example tree above.
 
