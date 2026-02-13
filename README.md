@@ -1,39 +1,37 @@
 # Yggdrasil
 
-An Emacs package for visualizing [Newick format](https://en.wikipedia.org/wiki/Newick_format) phylogenetic trees. Place your cursor inside a Newick string, invoke `yggdrasil-visualize`, and get an interactive ASCII tree in a child frame with live cursor tracking.
+Yggdrasil is an Emacs package for visualizing [Newick format](https://en.wikipedia.org/wiki/Newick_format) trees as interactive ASCII diagrams.
 
-```
-          ┌──────Human                          ┌──┼──┐
-  ┌───────┤
-  │       └──────Chimp                         ┌┼─┐  ┌┼─┐
-──┤                                 or         A  B  C  D
-  │       ┌──────Mouse
-  └───────┤                               (left-to-right)    (top-down)
-          └──────Rat
-```
+Place point inside a Newick string and run `M-x yggdrasil-visualize`.
+
+## Features
+
+- Detects Newick around point and renders it live.
+- Two layouts: top-down and left-to-right.
+- Optional proportional branch-length spacing.
+- Point/region-aware highlighting:
+  - No region: highlights node at point.
+  - Active region: highlights all nodes touched by selected text.
+- Jump from rendered tree back to source node location (mouse or keyboard).
+- GUI child-frame display with automatic fallback to a normal window.
 
 ## Requirements
 
-- Emacs 26.1 or later
-- GUI Emacs for child frame display (falls back to a split window in terminal)
+- Emacs 26.1+
 
 ## Installation
 
 ### Manual
 
-Clone or download this repository, then add to your Emacs config:
-
 ```elisp
-(add-to-list 'load-path "/path/to/Yggdrasil/")
+(add-to-list 'load-path "/path/to/yggdrasil/")
 (require 'yggdrasil)
 ```
 
-### Lazy loading
-
-Only load the package when you first call the command:
+### Lazy load
 
 ```elisp
-(add-to-list 'load-path "/path/to/Yggdrasil/")
+(add-to-list 'load-path "/path/to/yggdrasil/")
 (autoload 'yggdrasil-visualize "yggdrasil" nil t)
 ```
 
@@ -41,55 +39,93 @@ Only load the package when you first call the command:
 
 ```elisp
 (use-package yggdrasil
-  :load-path "/path/to/Yggdrasil/"
+  :load-path "/path/to/yggdrasil/"
   :commands yggdrasil-visualize)
 ```
 
 ## Usage
 
-1. Open a buffer containing a Newick tree string, e.g.:
+1. Open a buffer containing a Newick tree, for example:
 
-   ```
-   ((A:0.1,B:0.2):0.3,(C:0.4,D:0.5):0.6);
-   ```
+```text
+((Human:0.1,Chimp:0.2):0.3,(Mouse:0.4,Rat:0.5):0.6)Root;
+```
 
-2. Place your cursor anywhere inside the string.
-
+2. Put point inside that string.
 3. Run `M-x yggdrasil-visualize`.
 
-A child frame pops up showing the ASCII tree. The node under your cursor is highlighted. As you move the cursor through the Newick string, the highlight updates in real time.
+## Rendered Output (Actual)
 
-## Keybindings
+The snapshots below are real output from current `yggdrasil.el` for the example tree above.
 
-While the tree is displayed, these keys are active in the source buffer:
+### Top-down
 
-| Key | Command                       | Description                                      |
-|-----|-------------------------------|--------------------------------------------------|
-| `q` | `yggdrasil-dismiss`           | Close the tree frame                             |
-| `t` | `yggdrasil-toggle-lengths`    | Toggle proportional branch lengths               |
-| `r` | `yggdrasil-rotate`            | Toggle between top-down and left-to-right layout |
+```text
+           Root
+      +------+------+
+      |             |
+      |             |
+   +--+---+      +--+--+
+   |      |      |     |
+ Human  Chimp  Mouse  Rat
+```
+
+### Left-to-right
+
+```text
+
+            +------Human
+            |
+        +---+
+        |   |
+        |   +------Chimp
+        |
+   Root-+
+        |
+        |   +------Mouse
+        |   |
+        +---+
+            |
+            +------Rat
+```
+
+## Controls
+
+### In source buffer (while visualization is active)
+
+| Key | Command | Action |
+|---|---|---|
+| `q` | `yggdrasil-dismiss` | Close visualization |
+| `t` | `yggdrasil-toggle-lengths` | Toggle proportional branch lengths |
+| `r` | `yggdrasil-rotate` | Switch orientation |
+
+### In `*yggdrasil*` render buffer
+
+| Key/Mouse | Command | Action |
+|---|---|---|
+| `RET` / `<return>` / `C-m` | `yggdrasil-visit-source` | Jump to node location in `.nwk` source |
+| `f` | `yggdrasil-visit-source` | Same jump action |
+| `mouse-1` | `yggdrasil-visit-source-mouse` | Click node label/anchor to jump |
 
 ## Customization
 
-All options are under `M-x customize-group RET yggdrasil`:
+`M-x customize-group RET yggdrasil`
 
-| Variable                         | Default | Description                                              |
-|----------------------------------|---------|----------------------------------------------------------|
-| `yggdrasil-auto-close`           | `nil`   | Auto-close the tree when cursor leaves the Newick string |
-| `yggdrasil-show-branch-lengths`  | `nil`   | Use proportional spacing based on branch lengths         |
-| `yggdrasil-frame-parameters`     | ...     | Extra parameters for the child frame                     |
+| Variable | Default | Description |
+|---|---|---|
+| `yggdrasil-auto-close` | `nil` | Close visualization when point leaves Newick bounds |
+| `yggdrasil-show-branch-lengths` | `nil` | Scale edges by branch length |
+| `yggdrasil-display-method` | `auto` | `auto`, `child-frame`, or `window` |
+| `yggdrasil-frame-parameters` | alist | Extra child-frame parameters |
 
-The highlight face can be customized with `M-x customize-face RET yggdrasil-highlight`. It inherits from `success` so it adapts to your theme automatically.
+Face:
 
-## Newick Format
+- `M-x customize-face RET yggdrasil-highlight`
 
-Yggdrasil handles standard Newick syntax:
+## Notes
 
-- Parenthesized trees: `((A,B),(C,D));`
-- Branch lengths: `((A:0.1,B:0.2):0.3,C:0.4);`
-- Unnamed internal nodes: `((A,B),(C,D));`
-- Bare labels: `A;`
-- Nested to any depth
+- In terminal Emacs (`-nw`), mouse support depends on terminal settings; keyboard jump (`RET`) always works.
+- Unnamed internal nodes still have a clickable 1-character anchor.
 
 ## License
 
