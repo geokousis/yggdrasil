@@ -1,0 +1,8 @@
+* TODO Extend branches so that all leaf-labels are on the same level when branch lengths are off.
+
+* TODO When in an internal node or branch, highlight all children and branches.
+
+* TODO Make shortcut behaviour consistent when in tree-buffer and in original buffer.
+- Maybe change shortcuts from one-letter ones to C-? or M-?.
+
+* TODO Remove child-frame generation. Keep only window view.
