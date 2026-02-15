@@ -136,6 +136,9 @@ Set to 0 for immediate re-rendering on every command."
 (defvar-local yggdrasil--highlighted-source-positions nil
   "Hash set of currently highlighted source positions in display.")
 
+(defvar-local yggdrasil--source-modtick nil
+  "Buffer modification tick used to validate `yggdrasil--root'.")
+
 ;;;; Newick detection
 
 (defun yggdrasil--detect-newick ()
@@ -292,18 +295,41 @@ Return the root `yggdrasil-node'."
      (t
       name))))
 
-(defun yggdrasil--compute-widths (node &optional node-numbers)
+(defun yggdrasil--make-label-cache (root &optional node-numbers)
+  "Return cons (CACHE . MAX-LABEL-LEN) for ROOT.
+CACHE maps nodes to cons cells of (LABEL . LABEL-LEN)."
+  (let ((cache (make-hash-table :test 'eq))
+        (max-len 0))
+    (yggdrasil--walk
+     root
+     (lambda (node)
+       (let* ((label (yggdrasil--node-display-label node node-numbers))
+              (len (length label)))
+         (puthash node (cons label len) cache)
+         (when (> len max-len)
+           (setq max-len len)))))
+    (cons cache max-len)))
+
+(defun yggdrasil--label-for (node label-cache)
+  "Return cached display label for NODE from LABEL-CACHE."
+  (car (gethash node label-cache)))
+
+(defun yggdrasil--label-len-for (node label-cache)
+  "Return cached display label length for NODE from LABEL-CACHE."
+  (cdr (gethash node label-cache)))
+
+(defun yggdrasil--compute-widths (node label-cache)
   "Post-order: compute subtree-width for each NODE."
   (let ((children (yggdrasil-node-children node)))
     (if (null children)
         ;; Leaf: width is label length, minimum 1
         (setf (yggdrasil-node-subtree-width node)
-              (max 3 (length (yggdrasil--node-display-label node node-numbers))))
+              (max 3 (yggdrasil--label-len-for node label-cache)))
       ;; Internal: sum of children widths + gaps
       (dolist (c children)
-        (yggdrasil--compute-widths c node-numbers))
+        (yggdrasil--compute-widths c label-cache))
       (setf (yggdrasil-node-subtree-width node)
-            (max (length (yggdrasil--node-display-label node node-numbers))
+            (max (yggdrasil--label-len-for node label-cache)
                  yggdrasil-min-internal-width
                  (+ (cl-reduce #'+ children
                                :key #'yggdrasil-node-subtree-width)
@@ -341,7 +367,7 @@ SCALE is used for proportional mode."
             (last-x (yggdrasil-node-x (car (last children)))))
         (setf (yggdrasil-node-x node) (/ (+ first-x last-x) 2))))))
 
-(defun yggdrasil--normalize-positions (node &optional node-numbers)
+(defun yggdrasil--normalize-positions (node label-cache)
   "Shift all node positions so minimum x is 0.  Return (max-x . max-y)."
   (let ((min-x most-positive-fixnum)
         (max-x most-negative-fixnum)
@@ -351,7 +377,7 @@ SCALE is used for proportional mode."
                      (lambda (n)
                        (let ((nx (yggdrasil-node-x n))
                              (ny (yggdrasil-node-y n))
-                             (half-label (/ (length (yggdrasil--node-display-label n node-numbers)) 2)))
+                             (half-label (/ (yggdrasil--label-len-for n label-cache) 2)))
                          (setq min-x (min min-x (- nx half-label)))
                          (setq max-x (max max-x (+ nx half-label)))
                          (setq max-y (max max-y ny)))))
@@ -556,7 +582,7 @@ HIGHLIGHTED-NODES is a hash table of nodes to draw with highlight face."
           (setq scale (/ 20.0 max-len)))))
     scale))
 
-(defun yggdrasil--draw-labels (grid root highlighted-nodes node-numbers center-x)
+(defun yggdrasil--draw-labels (grid root highlighted-nodes label-cache center-x)
   "Draw node labels onto GRID for ROOT tree.
 HIGHLIGHTED-NODES gets the highlight face.  If CENTER-X is non-nil,
 labels are centered horizontally at each node's x; otherwise placed
@@ -564,10 +590,10 @@ starting at x."
   (yggdrasil--walk
    root
    (lambda (n)
-     (let* ((label (yggdrasil--node-display-label n node-numbers))
+     (let* ((label (yggdrasil--label-for n label-cache))
             (nx (yggdrasil-node-x n))
             (ny (yggdrasil-node-y n))
-            (label-len (length label))
+            (label-len (yggdrasil--label-len-for n label-cache))
             (lx (if center-x (- nx (/ label-len 2)) nx))
             (face (when (and highlighted-nodes
                              (gethash n highlighted-nodes))
@@ -588,18 +614,20 @@ starting at x."
 (defun yggdrasil--render-vertical (root highlighted-nodes)
   "Render ROOT as a top-down tree.  HIGHLIGHTED-NODES are highlighted."
   (let* ((node-numbers (yggdrasil--make-node-number-map root))
+         (label-data (yggdrasil--make-label-cache root node-numbers))
+         (label-cache (car label-data))
          (scale (yggdrasil--compute-scale root)))
-    (yggdrasil--compute-widths root node-numbers)
+    (yggdrasil--compute-widths root label-cache)
     (let* ((root-width (yggdrasil-node-subtree-width root))
            (root-x (/ root-width 2)))
       (yggdrasil--assign-positions root (max root-x 2) 0 scale))
-    (let* ((bounds (yggdrasil--normalize-positions root node-numbers))
+    (let* ((bounds (yggdrasil--normalize-positions root label-cache))
            (grid-width (+ (car bounds) 2))
            (grid-height (+ (cdr bounds) 2))
            (grid (yggdrasil--make-grid grid-width grid-height)))
       (yggdrasil--walk root
                        (lambda (n) (yggdrasil--draw-connectors grid n)))
-      (yggdrasil--draw-labels grid root highlighted-nodes node-numbers t)
+      (yggdrasil--draw-labels grid root highlighted-nodes label-cache t)
       (yggdrasil--grid-to-string grid))))
 
 ;;; Horizontal (left-to-right) rendering
@@ -615,15 +643,6 @@ nodes get the sum of children spans plus 1-row gaps."
       (setf (yggdrasil-node-subtree-width node)
             (+ (cl-reduce #'+ children :key #'yggdrasil-node-subtree-width)
                (1- (length children)))))))
-
-(defun yggdrasil--max-label-length (root &optional node-numbers)
-  "Return the maximum label length in ROOT tree."
-  (let ((m 0))
-    (yggdrasil--walk
-     root
-     (lambda (n)
-       (setq m (max m (length (yggdrasil--node-display-label n node-numbers))))))
-    m))
 
 (defun yggdrasil--assign-horiz-positions (node x y h-step scale)
   "Assign positions for horizontal layout.
@@ -650,13 +669,13 @@ proportional mode."
               (last-y (yggdrasil-node-y (car (last children)))))
           (setf (yggdrasil-node-y node) (/ (+ first-y last-y) 2)))))))
 
-(defun yggdrasil--draw-horiz-connectors (grid node &optional node-numbers)
+(defun yggdrasil--draw-horiz-connectors (grid node label-cache)
   "Draw left-to-right connectors from NODE to its children on GRID."
   (let ((children (yggdrasil-node-children node))
         (px (yggdrasil-node-x node))
         (py (yggdrasil-node-y node)))
     (when children
-      (let* ((label-end (+ px (length (yggdrasil--node-display-label node node-numbers))))
+      (let* ((label-end (+ px (yggdrasil--label-len-for node label-cache)))
              (junc-x (1+ label-end))
              (child-ys (mapcar #'yggdrasil-node-y children))
              (min-cy (apply #'min child-ys))
@@ -704,20 +723,22 @@ proportional mode."
 (defun yggdrasil--render-horizontal (root highlighted-nodes)
   "Render ROOT as a left-to-right tree.  HIGHLIGHTED-NODES are highlighted."
   (let* ((node-numbers (yggdrasil--make-node-number-map root))
+         (label-data (yggdrasil--make-label-cache root node-numbers))
+         (label-cache (car label-data))
          (scale (yggdrasil--compute-scale root))
-         (max-label-len (yggdrasil--max-label-length root node-numbers))
+         (max-label-len (cdr label-data))
          (h-step (+ max-label-len 3)))
     (yggdrasil--compute-vspan root)
     (let* ((root-vspan (yggdrasil-node-subtree-width root))
            (root-y (/ root-vspan 2)))
       (yggdrasil--assign-horiz-positions root 1 (max root-y 1) h-step scale))
-    (let* ((bounds (yggdrasil--normalize-positions root node-numbers))
+    (let* ((bounds (yggdrasil--normalize-positions root label-cache))
            (grid-width (+ (car bounds) max-label-len 2))
            (grid-height (+ (cdr bounds) 2))
            (grid (yggdrasil--make-grid grid-width grid-height)))
       (yggdrasil--walk root
-                       (lambda (n) (yggdrasil--draw-horiz-connectors grid n node-numbers)))
-      (yggdrasil--draw-labels grid root highlighted-nodes node-numbers nil)
+                       (lambda (n) (yggdrasil--draw-horiz-connectors grid n label-cache)))
+      (yggdrasil--draw-labels grid root highlighted-nodes label-cache nil)
       (yggdrasil--grid-to-string grid))))
 
 ;;;; Child frame / display
@@ -1137,10 +1158,27 @@ Return non-nil when applied."
           ;; Still keep the frame but clear highlight
           (yggdrasil--schedule-update))))))
 
+(defun yggdrasil--maybe-reparse-root ()
+  "Reparse Newick source when the buffer changed since last parse.
+Return non-nil if reparsing occurred."
+  (let ((bounds yggdrasil--newick-bounds))
+    (when (and bounds
+               (or (null yggdrasil--root)
+                   (not (equal yggdrasil--source-modtick
+                               (buffer-chars-modified-tick)))))
+      (let* ((str (buffer-substring-no-properties (car bounds) (cdr bounds))))
+        (setq yggdrasil--root (yggdrasil--parse str (car bounds))
+              yggdrasil--source-modtick (buffer-chars-modified-tick)
+              yggdrasil--last-highlight-key nil
+              yggdrasil--display-link-ranges nil
+              yggdrasil--highlighted-source-positions nil)
+        t))))
+
 (defun yggdrasil--update-display (&optional force)
   "Re-render the tree with point/region-driven highlighting.
 If FORCE is non-nil, render even if highlight selection has not changed."
   (when yggdrasil--root
+    (yggdrasil--maybe-reparse-root)
     (let* ((bounds yggdrasil--newick-bounds)
            (highlight-key (yggdrasil--highlight-key yggdrasil--root bounds)))
       (if (and (not force)
@@ -1188,6 +1226,7 @@ If FORCE is non-nil, render even if highlight selection has not changed."
       (setq yggdrasil--root root
             yggdrasil--newick-bounds bounds
             yggdrasil--source-buffer (current-buffer)
+            yggdrasil--source-modtick (buffer-chars-modified-tick)
             yggdrasil--last-highlight-key highlight-key
             yggdrasil--highlighted-source-positions
             (yggdrasil--source-pos-set-from-highlighted highlighted))
@@ -1218,6 +1257,7 @@ If FORCE is non-nil, render even if highlight selection has not changed."
 			(setq yggdrasil--display-buffer nil))
 		  (setq yggdrasil--root nil
 				yggdrasil--newick-bounds nil
+				yggdrasil--source-modtick nil
 				yggdrasil--orientation 'top-down
 				yggdrasil--last-highlight-key nil
 				yggdrasil--display-link-ranges nil
@@ -1242,19 +1282,18 @@ If FORCE is non-nil, render even if highlight selection has not changed."
         (with-current-buffer src
 		  (setq yggdrasil-show-branch-lengths (not yggdrasil-show-branch-lengths))
 		  (when yggdrasil--root
-			(let* ((bounds yggdrasil--newick-bounds)
-				   (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
-				   (root (yggdrasil--parse str (car bounds)))
-				   (highlight-key (yggdrasil--highlight-key root bounds))
-				   (highlighted (yggdrasil--collect-highlighted-nodes root highlight-key))
-				   (content (yggdrasil--render root highlighted)))
-			  (setq yggdrasil--root root
-					yggdrasil--last-highlight-key highlight-key
-					yggdrasil--highlighted-source-positions
-					(yggdrasil--source-pos-set-from-highlighted highlighted))
-			  (yggdrasil--refresh-display content)
-			  (yggdrasil--camera-follow-highlight
-			   highlight-key yggdrasil--highlighted-source-positions)))
+			(let* ((bounds yggdrasil--newick-bounds))
+			  (yggdrasil--maybe-reparse-root)
+			  (let* ((highlight-key (yggdrasil--highlight-key yggdrasil--root bounds))
+					 (highlighted (yggdrasil--collect-highlighted-nodes
+								   yggdrasil--root highlight-key))
+					 (content (yggdrasil--render yggdrasil--root highlighted)))
+				(setq yggdrasil--last-highlight-key highlight-key
+					  yggdrasil--highlighted-source-positions
+					  (yggdrasil--source-pos-set-from-highlighted highlighted))
+				(yggdrasil--refresh-display content)
+				(yggdrasil--camera-follow-highlight
+				 highlight-key yggdrasil--highlighted-source-positions))))
 		  (message "Yggdrasil: branch lengths %s."
 				   (if yggdrasil-show-branch-lengths "shown" "hidden")))
 	  (user-error "Source buffer not found"))))
@@ -1269,19 +1308,18 @@ If FORCE is non-nil, render even if highlight selection has not changed."
         (with-current-buffer src
 		  (setq yggdrasil-show-node-numbers (not yggdrasil-show-node-numbers))
 		  (when yggdrasil--root
-			(let* ((bounds yggdrasil--newick-bounds)
-				   (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
-				   (root (yggdrasil--parse str (car bounds)))
-				   (highlight-key (yggdrasil--highlight-key root bounds))
-				   (highlighted (yggdrasil--collect-highlighted-nodes root highlight-key))
-				   (content (yggdrasil--render root highlighted)))
-			  (setq yggdrasil--root root
-					yggdrasil--last-highlight-key highlight-key
-					yggdrasil--highlighted-source-positions
-					(yggdrasil--source-pos-set-from-highlighted highlighted))
-			  (yggdrasil--refresh-display content)
-			  (yggdrasil--camera-follow-highlight
-			   highlight-key yggdrasil--highlighted-source-positions)))
+			(let* ((bounds yggdrasil--newick-bounds))
+			  (yggdrasil--maybe-reparse-root)
+			  (let* ((highlight-key (yggdrasil--highlight-key yggdrasil--root bounds))
+					 (highlighted (yggdrasil--collect-highlighted-nodes
+								   yggdrasil--root highlight-key))
+					 (content (yggdrasil--render yggdrasil--root highlighted)))
+				(setq yggdrasil--last-highlight-key highlight-key
+					  yggdrasil--highlighted-source-positions
+					  (yggdrasil--source-pos-set-from-highlighted highlighted))
+				(yggdrasil--refresh-display content)
+				(yggdrasil--camera-follow-highlight
+				 highlight-key yggdrasil--highlighted-source-positions))))
 		  (message "Yggdrasil: node numbers %s."
 				   (if yggdrasil-show-node-numbers "shown" "hidden")))
 	  (user-error "Source buffer not found"))))
@@ -1306,19 +1344,18 @@ If FORCE is non-nil, render even if highlight selection has not changed."
 		  (setq yggdrasil--orientation
 				(if (eq yggdrasil--orientation 'top-down) 'left-to-right 'top-down))
 		  (when yggdrasil--root
-			(let* ((bounds yggdrasil--newick-bounds)
-				   (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
-				   (root (yggdrasil--parse str (car bounds)))
-				   (highlight-key (yggdrasil--highlight-key root bounds))
-				   (highlighted (yggdrasil--collect-highlighted-nodes root highlight-key))
-				   (content (yggdrasil--render root highlighted)))
-			  (setq yggdrasil--root root
-					yggdrasil--last-highlight-key highlight-key
-					yggdrasil--highlighted-source-positions
-					(yggdrasil--source-pos-set-from-highlighted highlighted))
-			  (yggdrasil--refresh-display content)
-			  (yggdrasil--camera-follow-highlight
-			   highlight-key yggdrasil--highlighted-source-positions)))
+			(let* ((bounds yggdrasil--newick-bounds))
+			  (yggdrasil--maybe-reparse-root)
+			  (let* ((highlight-key (yggdrasil--highlight-key yggdrasil--root bounds))
+					 (highlighted (yggdrasil--collect-highlighted-nodes
+								   yggdrasil--root highlight-key))
+					 (content (yggdrasil--render yggdrasil--root highlighted)))
+				(setq yggdrasil--last-highlight-key highlight-key
+					  yggdrasil--highlighted-source-positions
+					  (yggdrasil--source-pos-set-from-highlighted highlighted))
+				(yggdrasil--refresh-display content)
+				(yggdrasil--camera-follow-highlight
+				 highlight-key yggdrasil--highlighted-source-positions))))
 		  (message "Yggdrasil: %s." yggdrasil--orientation))
 	  (user-error "Source buffer not found"))))
 
