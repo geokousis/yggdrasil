@@ -918,6 +918,10 @@ SOURCE-BUFFER tracks the display buffer."
     (define-key map (kbd "C-m") #'yggdrasil-visit-source)
     (define-key map (kbd "f") #'yggdrasil-visit-source)
     (define-key map [mouse-1] #'yggdrasil-visit-source-mouse)
+	(define-key map (kbd "q") #'yggdrasil-dismiss)
+    (define-key map (kbd "t") #'yggdrasil-toggle-lengths)
+    (define-key map (kbd "n") #'yggdrasil-toggle-node-numbers)
+    (define-key map (kbd "r") #'yggdrasil-rotate)
     map)
   "Keymap for `yggdrasil-mode'.")
 
@@ -1197,66 +1201,90 @@ If FORCE is non-nil, render even if highlight selection has not changed."
 (defun yggdrasil-dismiss ()
   "Close the tree visualization and clean up."
   (interactive)
-  (yggdrasil--cancel-pending-update)
-  (when (and yggdrasil--frame (frame-live-p yggdrasil--frame))
-    (delete-frame yggdrasil--frame)
-    (setq yggdrasil--frame nil))
-  (when (and yggdrasil--display-buffer (buffer-live-p yggdrasil--display-buffer))
-    ;; Close window if displayed in terminal mode
-    (let ((win (get-buffer-window yggdrasil--display-buffer)))
-      (when win (delete-window win)))
-    (kill-buffer yggdrasil--display-buffer)
-    (setq yggdrasil--display-buffer nil))
-  (setq yggdrasil--root nil
-        yggdrasil--newick-bounds nil
-        yggdrasil--orientation 'top-down
-        yggdrasil--last-highlight-key nil
-        yggdrasil--display-link-ranges nil
-        yggdrasil--highlighted-source-positions nil)
-  (yggdrasil-active-mode -1)
-  (message "Yggdrasil: dismissed."))
+  (let ((src (if (derived-mode-p 'yggdrasil-mode)
+                 (yggdrasil--resolve-source-buffer)
+			   (current-buffer))))
+    (if (and src (buffer-live-p src))
+        (with-current-buffer src
+		  (yggdrasil--cancel-pending-update)
+		  (when (and yggdrasil--frame (frame-live-p yggdrasil--frame))
+			(delete-frame yggdrasil--frame)
+			(setq yggdrasil--frame nil))
+		  (when (and yggdrasil--display-buffer (buffer-live-p yggdrasil--display-buffer))
+			;; Close window if displayed in terminal mode
+			(let ((win (get-buffer-window yggdrasil--display-buffer)))
+			  (kill-buffer yggdrasil--display-buffer)
+			  (when win (delete-window win)))
+			(setq yggdrasil--display-buffer nil))
+		  (setq yggdrasil--root nil
+				yggdrasil--newick-bounds nil
+				yggdrasil--orientation 'top-down
+				yggdrasil--last-highlight-key nil
+				yggdrasil--display-link-ranges nil
+				yggdrasil--highlighted-source-positions nil)
+		  (yggdrasil-active-mode -1)
+		  (message "Yggdrasil: dismissed."))
+	  ;; If source is lost but we are in the display buffer, just close the display
+      (when (derived-mode-p 'yggdrasil-mode)
+		    (if (and yggdrasil--display-buffer (buffer-live-p yggdrasil--display-buffer))
+				(kill-buffer (yggdrasil--display-buffer))
+			  (setq yggdrasil--display-buffer nil)
+			  (message "Yggdrasil: dismissed (source buffer lost).")))
+	  )))
 
 (defun yggdrasil-toggle-lengths ()
   "Toggle proportional branch lengths and re-render."
   (interactive)
-  (setq yggdrasil-show-branch-lengths (not yggdrasil-show-branch-lengths))
-  (when yggdrasil--root
-    (let* ((bounds yggdrasil--newick-bounds)
-           (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
-           (root (yggdrasil--parse str (car bounds)))
-           (highlight-key (yggdrasil--highlight-key root bounds))
-           (highlighted (yggdrasil--collect-highlighted-nodes root highlight-key))
-           (content (yggdrasil--render root highlighted)))
-      (setq yggdrasil--root root
-            yggdrasil--last-highlight-key highlight-key
-            yggdrasil--highlighted-source-positions
-            (yggdrasil--source-pos-set-from-highlighted highlighted))
-      (yggdrasil--refresh-display content)
-      (yggdrasil--camera-follow-highlight
-       highlight-key yggdrasil--highlighted-source-positions)))
-  (message "Yggdrasil: branch lengths %s."
-           (if yggdrasil-show-branch-lengths "shown" "hidden")))
+  (let ((src (if (derived-mode-p 'yggdrasil-mode)
+                 (yggdrasil--resolve-source-buffer)
+               (current-buffer))))
+    (if (and src (buffer-live-p src))
+        (with-current-buffer src
+		  (setq yggdrasil-show-branch-lengths (not yggdrasil-show-branch-lengths))
+		  (when yggdrasil--root
+			(let* ((bounds yggdrasil--newick-bounds)
+				   (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
+				   (root (yggdrasil--parse str (car bounds)))
+				   (highlight-key (yggdrasil--highlight-key root bounds))
+				   (highlighted (yggdrasil--collect-highlighted-nodes root highlight-key))
+				   (content (yggdrasil--render root highlighted)))
+			  (setq yggdrasil--root root
+					yggdrasil--last-highlight-key highlight-key
+					yggdrasil--highlighted-source-positions
+					(yggdrasil--source-pos-set-from-highlighted highlighted))
+			  (yggdrasil--refresh-display content)
+			  (yggdrasil--camera-follow-highlight
+			   highlight-key yggdrasil--highlighted-source-positions)))
+		  (message "Yggdrasil: branch lengths %s."
+				   (if yggdrasil-show-branch-lengths "shown" "hidden")))
+	  (user-error "Source buffer not found"))))
 
 (defun yggdrasil-toggle-node-numbers ()
   "Toggle node numbers in labels and re-render."
   (interactive)
-  (setq yggdrasil-show-node-numbers (not yggdrasil-show-node-numbers))
-  (when yggdrasil--root
-    (let* ((bounds yggdrasil--newick-bounds)
-           (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
-           (root (yggdrasil--parse str (car bounds)))
-           (highlight-key (yggdrasil--highlight-key root bounds))
-           (highlighted (yggdrasil--collect-highlighted-nodes root highlight-key))
-           (content (yggdrasil--render root highlighted)))
-      (setq yggdrasil--root root
-            yggdrasil--last-highlight-key highlight-key
-            yggdrasil--highlighted-source-positions
-            (yggdrasil--source-pos-set-from-highlighted highlighted))
-      (yggdrasil--refresh-display content)
-      (yggdrasil--camera-follow-highlight
-       highlight-key yggdrasil--highlighted-source-positions)))
-  (message "Yggdrasil: node numbers %s."
-           (if yggdrasil-show-node-numbers "shown" "hidden")))
+  (let ((src (if (derived-mode-p 'yggdrasil-mode)
+                 (yggdrasil--resolve-source-buffer)
+               (current-buffer))))
+    (if (and src (buffer-live-p src))
+        (with-current-buffer src
+		  (setq yggdrasil-show-node-numbers (not yggdrasil-show-node-numbers))
+		  (when yggdrasil--root
+			(let* ((bounds yggdrasil--newick-bounds)
+				   (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
+				   (root (yggdrasil--parse str (car bounds)))
+				   (highlight-key (yggdrasil--highlight-key root bounds))
+				   (highlighted (yggdrasil--collect-highlighted-nodes root highlight-key))
+				   (content (yggdrasil--render root highlighted)))
+			  (setq yggdrasil--root root
+					yggdrasil--last-highlight-key highlight-key
+					yggdrasil--highlighted-source-positions
+					(yggdrasil--source-pos-set-from-highlighted highlighted))
+			  (yggdrasil--refresh-display content)
+			  (yggdrasil--camera-follow-highlight
+			   highlight-key yggdrasil--highlighted-source-positions)))
+		  (message "Yggdrasil: node numbers %s."
+				   (if yggdrasil-show-node-numbers "shown" "hidden")))
+	  (user-error "Source buffer not found"))))
 
 (defun yggdrasil-toggle-camera ()
   "Toggle camera follow mode for keeping highlighted nodes in view."
@@ -1270,23 +1298,29 @@ If FORCE is non-nil, render even if highlight selection has not changed."
 (defun yggdrasil-rotate ()
   "Toggle tree orientation between top-down and left-to-right."
   (interactive)
-  (setq yggdrasil--orientation
-        (if (eq yggdrasil--orientation 'top-down) 'left-to-right 'top-down))
-  (when yggdrasil--root
-    (let* ((bounds yggdrasil--newick-bounds)
-           (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
-           (root (yggdrasil--parse str (car bounds)))
-           (highlight-key (yggdrasil--highlight-key root bounds))
-           (highlighted (yggdrasil--collect-highlighted-nodes root highlight-key))
-           (content (yggdrasil--render root highlighted)))
-      (setq yggdrasil--root root
-            yggdrasil--last-highlight-key highlight-key
-            yggdrasil--highlighted-source-positions
-            (yggdrasil--source-pos-set-from-highlighted highlighted))
-      (yggdrasil--refresh-display content)
-      (yggdrasil--camera-follow-highlight
-       highlight-key yggdrasil--highlighted-source-positions)))
-  (message "Yggdrasil: %s." yggdrasil--orientation))
+  (let ((src (if (derived-mode-p 'yggdrasil-mode)
+                 (yggdrasil--resolve-source-buffer)
+               (current-buffer))))
+    (if (and src (buffer-live-p src))
+        (with-current-buffer src
+		  (setq yggdrasil--orientation
+				(if (eq yggdrasil--orientation 'top-down) 'left-to-right 'top-down))
+		  (when yggdrasil--root
+			(let* ((bounds yggdrasil--newick-bounds)
+				   (str (buffer-substring-no-properties (car bounds) (cdr bounds)))
+				   (root (yggdrasil--parse str (car bounds)))
+				   (highlight-key (yggdrasil--highlight-key root bounds))
+				   (highlighted (yggdrasil--collect-highlighted-nodes root highlight-key))
+				   (content (yggdrasil--render root highlighted)))
+			  (setq yggdrasil--root root
+					yggdrasil--last-highlight-key highlight-key
+					yggdrasil--highlighted-source-positions
+					(yggdrasil--source-pos-set-from-highlighted highlighted))
+			  (yggdrasil--refresh-display content)
+			  (yggdrasil--camera-follow-highlight
+			   highlight-key yggdrasil--highlighted-source-positions)))
+		  (message "Yggdrasil: %s." yggdrasil--orientation))
+	  (user-error "Source buffer not found"))))
 
 (provide 'yggdrasil)
 
