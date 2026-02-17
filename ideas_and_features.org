@@ -6,3 +6,11 @@
 - Maybe change shortcuts from one-letter ones to C-? or M-?.
 
 * TODO Remove child-frame generation. Keep only window view.
+
+* TODO Extract subtree from point/internal-node.
+2 or 3 functions: a) one requires the number of internal node and
+extracts newick tree in the kill-ring.
+b) in the source buffer: extract subtree at point if point if
+located in internal node and store in kill-ring.
+c) in the tree buffer, extract all children of node or branch under
+the cursor and store newick representation in the kill-ring.
