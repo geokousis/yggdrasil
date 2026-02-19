@@ -1,0 +1,16 @@
+* TODO Extend branches so that all leaf-labels are on the same level when branch lengths are off.
+
+* TODO When in an internal node or branch, highlight all children and branches.
+
+* TODO Make shortcut behaviour consistent when in tree-buffer and in original buffer.
+- Maybe change shortcuts from one-letter ones to C-? or M-?.
+
+* TODO Remove child-frame generation. Keep only window view.
+
+* TODO Extract subtree from point/internal-node.
+2 or 3 functions: a) one requires the number of internal node and
+extracts newick tree in the kill-ring.
+b) in the source buffer: extract subtree at point if point if
+located in internal node and store in kill-ring.
+c) in the tree buffer, extract all children of node or branch under
+the cursor and store newick representation in the kill-ring.

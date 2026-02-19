@@ -111,7 +111,13 @@ The snapshots below are real output from current `yggdrasil.el` for the example 
 | `q` | `yggdrasil-dismiss` | Close visualization |
 | `t` | `yggdrasil-toggle-lengths` | Toggle proportional branch lengths |
 | `n` | `yggdrasil-toggle-node-numbers` | Toggle node numbers in labels |
+| `c` | `yggdrasil-toggle-camera` | Keep highlighted node in view |
 | `r` | `yggdrasil-rotate` | Switch orientation |
+
+Camera follow:
+
+- Press `c` to toggle camera mode on/off while visualization is active.
+- When enabled, Yggdrasil auto-recenters and adjusts horizontal scroll if the highlighted node moves out of view.
 
 ### In `yggdrasil` render buffer
 
@@ -130,6 +136,8 @@ The snapshots below are real output from current `yggdrasil.el` for the example 
 | `yggdrasil-auto-close` | `nil` | Close visualization when point leaves Newick bounds |
 | `yggdrasil-show-branch-lengths` | `nil` | Scale edges by branch length |
 | `yggdrasil-show-node-numbers` | `nil` | Show node numbers as `Label[ID]` / `[ID]` |
+| `yggdrasil-camera-follow` | `nil` | Keep current highlight visible in render display |
+| `yggdrasil-update-idle-delay` | `0.03` | Idle seconds before highlight refresh (`0` = every command) |
 | `yggdrasil-display-method` | `auto` | `auto`, `child-frame`, or `window` |
 | `yggdrasil-frame-parameters` | alist | Extra child-frame parameters |
 
