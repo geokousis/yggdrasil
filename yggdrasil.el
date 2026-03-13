@@ -936,7 +936,7 @@ SOURCE-BUFFER tracks the display buffer."
     (set-keymap-parent map special-mode-map)
     (define-key map (kbd "RET") #'yggdrasil-visit-source)
     (define-key map (kbd "<return>") #'yggdrasil-visit-source)
-    (define-key map (kbd "C-m") #'yggdrasil-visit-source)
+    (define-key map (kbd "C-t") #'yggdrasil-visit-source)
     (define-key map (kbd "f") #'yggdrasil-visit-source)
     (define-key map [mouse-1] #'yggdrasil-visit-source-mouse)
 	(define-key map (kbd "q") #'yggdrasil-dismiss)
@@ -949,7 +949,8 @@ SOURCE-BUFFER tracks the display buffer."
 (define-derived-mode yggdrasil-mode special-mode "Yggdrasil"
   "Major mode for displaying Newick tree visualizations."
   (setq-local truncate-lines t)
-  (setq-local cursor-type nil))
+  ;; (setq-local cursor-type nil)
+  )
 
 (defvar yggdrasil-active-mode-map
   (let ((map (make-sparse-keymap)))
@@ -957,6 +958,7 @@ SOURCE-BUFFER tracks the display buffer."
     (define-key map (kbd "t") #'yggdrasil-toggle-lengths)
     (define-key map (kbd "n") #'yggdrasil-toggle-node-numbers)
     (define-key map (kbd "c") #'yggdrasil-toggle-camera)
+	(define-key map (kbd "C-t") #'yggdrasil-focus-display-node)
     (define-key map (kbd "r") #'yggdrasil-rotate)
     map)
   "Keymap for `yggdrasil-active-mode'.")
@@ -1235,7 +1237,62 @@ If FORCE is non-nil, render even if highlight selection has not changed."
       (yggdrasil-active-mode 1)
       (yggdrasil--camera-follow-highlight
        highlight-key yggdrasil--highlighted-source-positions)
-      (message "Yggdrasil: click/RET jump; q dismisses; t lengths; n node numbers; c camera; r rotate."))))
+      (message "Yggdrasil: click/RET jump; q dismisses; g focus display; t lengths; n node numbers; c camera; r rotate."))))
+
+(defun yggdrasil--display-window ()
+  "Return a live window showing the yggdrasil display buffer, or nil."
+  (when (and yggdrasil--display-buffer
+             (buffer-live-p yggdrasil--display-buffer))
+    (or (and yggdrasil--frame
+             (frame-live-p yggdrasil--frame)
+             (let ((win (frame-root-window yggdrasil--frame)))
+               (and (window-live-p win)
+                    (eq (window-buffer win) yggdrasil--display-buffer)
+                    win)))
+        (get-buffer-window yggdrasil--display-buffer t))))
+ 
+(defun yggdrasil-focus-display-node ()
+  "Move focus to the ASCII tree node corresponding to point in the Newick string. 
+When called from the source buffer with `yggdrasil-active-mode' active and
+the cursor inside a Newick string, this command locates the deepest tree node
+whose source span contains point, then moves point in the *yggdrasil* display
+buffer to the matching ASCII label and selects that window/frame."
+  (interactive)
+  (unless yggdrasil-active-mode
+    (user-error "Yggdrasil is not active in this buffer"))
+  (unless (and yggdrasil--root yggdrasil--newick-bounds)
+    (user-error "No tree is currently visualized"))
+  (let* ((bounds yggdrasil--newick-bounds)
+         (pt (point)))
+    (unless (and (>= pt (car bounds)) (<= pt (cdr bounds)))
+      (user-error "Point is not inside the Newick string"))
+    (let* ((node (yggdrasil--node-at-pos yggdrasil--root pt))
+           (_ (unless node (user-error "No tree node found at point")))
+           (src-pos (yggdrasil-node-start-pos node))
+           (_ (unless (hash-table-p yggdrasil--display-link-ranges)
+                (user-error "Display index not available; try visualizing again")))
+           (ranges (gethash src-pos yggdrasil--display-link-ranges))
+           (_ (unless ranges
+                (user-error "Node \"%s\" has no corresponding position in display"
+                            (yggdrasil-node-name node))))
+           (target-pos (car (car ranges)))
+           (display-buf yggdrasil--display-buffer)
+           (win (yggdrasil--display-window)))
+      (unless (and display-buf (buffer-live-p display-buf))
+        (user-error "Display buffer is no longer available"))
+      (if win
+          (progn
+            (with-current-buffer display-buf
+              (goto-char target-pos))
+            (set-window-point win target-pos)
+            (if (and yggdrasil--frame (frame-live-p yggdrasil--frame))
+                (progn
+                  (select-frame-set-input-focus yggdrasil--frame)
+                  (select-window win))
+              (select-window win))
+            (message "Yggdrasil: focused on node \"%s\" in display."
+                     (yggdrasil-node-name node)))
+        (user-error "Tree display window is not visible")))))
 
 (defun yggdrasil-dismiss ()
   "Close the tree visualization and clean up."
