@@ -47,37 +47,12 @@
   :type 'boolean
   :group 'yggdrasil)
 
-(defcustom yggdrasil-display-method 'auto
-  "How to display the rendered tree.
-`auto' prefers child frames in GUI Emacs and falls back to a window.
-`child-frame' forces child frame display.
-`window' always uses a normal Emacs window."
-  :type '(choice (const :tag "Auto" auto)
-                 (const :tag "Child frame" child-frame)
-                 (const :tag "Window" window))
-  :group 'yggdrasil)
-
 (defcustom yggdrasil-update-idle-delay 0.03
   "Idle delay in seconds before refreshing highlight after cursor movement.
 Set to 0 for immediate re-rendering on every command."
   :type 'number
   :group 'yggdrasil)
 
-(defcustom yggdrasil-frame-parameters
-  '((internal-border-width . 1)
-    (left-fringe . 0)
-    (right-fringe . 0)
-    (vertical-scroll-bars . nil)
-    (horizontal-scroll-bars . nil)
-    (menu-bar-lines . 0)
-    (tool-bar-lines . 0)
-    (tab-bar-lines . 0)
-    (line-spacing . 0)
-    (no-special-glyphs . t)
-    (undecorated . t))
-  "Extra frame parameters for the child frame."
-  :type '(alist :key-type symbol :value-type sexp)
-  :group 'yggdrasil)
 
 ;;;; Faces
 
@@ -106,8 +81,6 @@ Set to 0 for immediate re-rendering on every command."
 
 ;;;; Internal state
 
-(defvar-local yggdrasil--frame nil
-  "The child frame displaying the tree.")
 
 (defvar-local yggdrasil--root nil
   "The parsed tree root node.")
@@ -741,18 +714,11 @@ proportional mode."
       (yggdrasil--draw-labels grid root highlighted-nodes label-cache nil)
       (yggdrasil--grid-to-string grid))))
 
-;;;; Child frame / display
-
-(defun yggdrasil--char-pixel-size ()
-  "Return (CHAR-WIDTH . CHAR-HEIGHT) in pixels for the current frame."
-  (cons (frame-char-width) (frame-char-height)))
+;;;; Display
 
 (defun yggdrasil--show-frame (content source-buffer)
-  "Display CONTENT in a child frame near point in SOURCE-BUFFER."
-  (let* ((buf (get-buffer-create "*yggdrasil*"))
-         (lines (split-string content "\n"))
-         (max-line-len (apply #'max (mapcar #'length lines)))
-         (num-lines (length lines)))
+  "Display CONTENT in a window below SOURCE-BUFFER."
+  (let ((buf (get-buffer-create "*yggdrasil*")))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -762,64 +728,8 @@ proportional mode."
       (setq-local yggdrasil--source-buffer source-buffer))
     (with-current-buffer source-buffer
       (setq yggdrasil--display-buffer buf))
-    (pcase yggdrasil-display-method
-      ('window
-       (yggdrasil--show-window buf source-buffer))
-      ('child-frame
-       (if (display-graphic-p)
-           (yggdrasil--show-child-frame buf max-line-len num-lines source-buffer)
-         (user-error "Yggdrasil child-frame display requires GUI Emacs")))
-      (_
-       ;; Auto mode: prefer child frames, but always fall back to a normal
-       ;; window if frame creation fails (common on some WM/GUI setups).
-       (if (display-graphic-p)
-           (condition-case err
-               (yggdrasil--show-child-frame buf max-line-len num-lines source-buffer)
-             (error
-              (message "Yggdrasil: child frame failed (%s), using window."
-                       (error-message-string err))
-              (yggdrasil--show-window buf source-buffer)))
-         (yggdrasil--show-window buf source-buffer))))))
-
-(defun yggdrasil--show-child-frame (buf width height source-buffer)
-  "Show BUF in a child frame of WIDTH x HEIGHT chars.
-SOURCE-BUFFER is the originating buffer."
-  (with-current-buffer source-buffer
-    ;; Close existing frame if any
-    (when (and yggdrasil--frame (frame-live-p yggdrasil--frame))
-      (delete-frame yggdrasil--frame))
-    (let* ((char-size (yggdrasil--char-pixel-size))
-           (pixel-w (+ (* (+ width 2) (car char-size)) 20))
-           (pixel-h (+ (* (+ height 1) (cdr char-size)) 10))
-           (pos (or (window-absolute-pixel-position)
-                    (cons 100 100)))
-           (frame-x (car pos))
-           (frame-y (+ (cdr pos) (cdr char-size)))
-           (params (append
-                    `((parent-frame . ,(selected-frame))
-                      (no-accept-focus . t)
-                      (width . (text-pixels . ,pixel-w))
-                      (height . (text-pixels . ,pixel-h))
-                      (left . ,frame-x)
-                      (top . ,frame-y)
-                      (minibuffer . nil)
-                      (visibility . t))
-                    yggdrasil-frame-parameters))
-           (frame (make-frame params)))
-      (set-frame-parameter frame 'background-color
-                           (face-attribute 'default :background nil t))
-      (let ((win (frame-root-window frame)))
-        (set-window-buffer win buf)
-        (set-window-dedicated-p win t))
-      (setq yggdrasil--frame frame))))
-
-(defun yggdrasil--show-window (buf source-buffer)
-  "Show BUF in a split window (terminal fallback).
-SOURCE-BUFFER tracks the display buffer."
-  (with-current-buffer source-buffer
-    (setq yggdrasil--display-buffer buf))
-  (display-buffer buf '(display-buffer-below-selected
-                        (window-height . fit-window-to-buffer))))
+    (display-buffer buf '(display-buffer-below-selected
+                          (window-height . fit-window-to-buffer)))))
 
 (defun yggdrasil--highlight-key-equal-p (a b)
   "Return non-nil when highlight keys A and B represent the same selection."
@@ -1092,15 +1002,8 @@ Return non-nil when applied."
       (let* ((ranges (gethash source-pos yggdrasil--display-link-ranges))
            (target (and ranges (car (car ranges)))))
       (let ((win (and target
-                      (or
-                       (and yggdrasil--frame
-                            (frame-live-p yggdrasil--frame)
-                            (let ((frame-win (frame-root-window yggdrasil--frame)))
-                              (and (window-live-p frame-win)
-                                   (eq (window-buffer frame-win) display-buf)
-                                   frame-win)))
-                       (get-buffer-window display-buf t)
-                       (car (get-buffer-window-list display-buf nil t))))))
+                      (or (get-buffer-window display-buf t)
+                          (car (get-buffer-window-list display-buf nil t))))))
         (when (and target (window-live-p win))
           (with-selected-window win
             (when (not (pos-visible-in-window-p target win t))
@@ -1139,10 +1042,6 @@ Return non-nil when applied."
 (defun yggdrasil--on-theme-change (&rest _)
   "Re-render the tree display after a theme change."
   (when (and yggdrasil-active-mode yggdrasil--root)
-    ;; Update child frame background if in GUI
-    (when (and yggdrasil--frame (frame-live-p yggdrasil--frame))
-      (set-frame-parameter yggdrasil--frame 'background-color
-                           (face-attribute 'default :background nil t)))
     (yggdrasil--schedule-update t)))
 
 (defun yggdrasil--post-command ()
@@ -1243,13 +1142,7 @@ If FORCE is non-nil, render even if highlight selection has not changed."
   "Return a live window showing the yggdrasil display buffer, or nil."
   (when (and yggdrasil--display-buffer
              (buffer-live-p yggdrasil--display-buffer))
-    (or (and yggdrasil--frame
-             (frame-live-p yggdrasil--frame)
-             (let ((win (frame-root-window yggdrasil--frame)))
-               (and (window-live-p win)
-                    (eq (window-buffer win) yggdrasil--display-buffer)
-                    win)))
-        (get-buffer-window yggdrasil--display-buffer t))))
+    (get-buffer-window yggdrasil--display-buffer t)))
  
 (defun yggdrasil-focus-display-node ()
   "Move focus to the ASCII tree node corresponding to point in the Newick string. 
@@ -1285,11 +1178,7 @@ buffer to the matching ASCII label and selects that window/frame."
             (with-current-buffer display-buf
               (goto-char target-pos))
             (set-window-point win target-pos)
-            (if (and yggdrasil--frame (frame-live-p yggdrasil--frame))
-                (progn
-                  (select-frame-set-input-focus yggdrasil--frame)
-                  (select-window win))
-              (select-window win))
+            (select-window win)
             (message "Yggdrasil: focused on node \"%s\" in display."
                      (yggdrasil-node-name node)))
         (user-error "Tree display window is not visible")))))
@@ -1303,11 +1192,7 @@ buffer to the matching ASCII label and selects that window/frame."
     (if (and src (buffer-live-p src))
         (with-current-buffer src
 		  (yggdrasil--cancel-pending-update)
-		  (when (and yggdrasil--frame (frame-live-p yggdrasil--frame))
-			(delete-frame yggdrasil--frame)
-			(setq yggdrasil--frame nil))
 		  (when (and yggdrasil--display-buffer (buffer-live-p yggdrasil--display-buffer))
-			;; Close window if displayed in terminal mode
 			(let ((win (get-buffer-window yggdrasil--display-buffer)))
 			  (kill-buffer yggdrasil--display-buffer)
 			  (when win (delete-window win)))
